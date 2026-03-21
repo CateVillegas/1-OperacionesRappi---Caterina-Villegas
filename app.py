@@ -209,13 +209,13 @@ def chat():
                 metric = result.get('metric', '')
                 n = result.get('n', len(rows))
                 header = f"**Top {n} Zonas — {metric} (Semana Actual)**"
-                table_lines = ["Zona | Ciudad | País | Valor", "|---|---|---:|---:|"]
+                table_lines = ["| Zona | Ciudad | País | Valor |", "| --- | --- | ---: | ---: |"]
                 for r in rows:
                     zone = r.get('zone', '')
                     city = r.get('city', '')
                     country = r.get('country', '')
                     val = r.get('value_fmt', str(r.get('value', '')))
-                    table_lines.append(f"{zone} | {city} | {country} | {val}")
+                    table_lines.append(f"| {zone} | {city} | {country} | {val} |")
 
                 table_md = header + "\n\n" + "\n".join(table_lines) + "\n"
                 response_text = table_md
@@ -230,7 +230,7 @@ def chat():
                 mh = result.get('metric_high', 'Metric A')
                 ml = result.get('metric_low', 'Metric B')
                 header = f"**Zonas con alto {mh} pero bajo {ml}**"
-                table_lines = [f"Zona | Ciudad | País | Tipo de Zona | {mh} | {ml}", "|---|---|---:|---|---:|---:|"]
+                table_lines = [f"| Zona | Ciudad | País | Tipo de Zona | {mh} | {ml} |", "| --- | --- | ---: | --- | ---: | ---: |"]
                 for r in rows:
                     zone = r.get('zone', '')
                     city = r.get('city', '')
@@ -238,7 +238,7 @@ def chat():
                     zt = r.get('zone_type', '')
                     vh = r.get('val_high_fmt', str(r.get('val_high', '')))
                     vl = r.get('val_low_fmt', str(r.get('val_low', '')))
-                    table_lines.append(f"{zone} | {city} | {country} | {zt} | {vh} | {vl}")
+                    table_lines.append(f"| {zone} | {city} | {country} | {zt} | {vh} | {vl} |")
 
                 table_md = header + "\n\n" + "\n".join(table_lines) + "\n"
                 response_text = table_md
