@@ -178,7 +178,15 @@ def chat():
     
     # Step 3: Generate chart data
     chart_config = generate_chart_data(result, query_type)
-    chart_b64 = render_chart_to_base64(chart_config) if chart_config else None
+    # No generar gráfico si hay menos de 2 etiquetas/puntos
+    try:
+        labels_count = len(chart_config.get('labels', [])) if chart_config and isinstance(chart_config, dict) else 0
+    except Exception:
+        labels_count = 0
+    if chart_config and labels_count >= 2:
+        chart_b64 = render_chart_to_base64(chart_config)
+    else:
+        chart_b64 = None
     
     # Step 4: Generate natural language response
     response_text = generate_response(user_message, result, query_type, history)
@@ -372,22 +380,23 @@ def generate_report():
         
         try:
             raw = compile_raw_insights()
-            _report_status['progress'] = 'Generando reporte con IA...'
+            _report_status['progress'] = 'Generando resumen ejecutivo con IA...'
             
-            md_content = generate_report_with_gemini(raw)
-            _report_status['content'] = md_content
+            html_content = generate_report_with_gemini(raw)  # also populates raw['executive_summary']
+            _report_status['content'] = html_content
             _report_status['progress'] = 'Generando PDF...'
             
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             pdf_path = os.path.join(REPORTS_DIR, f'rappi_insights_{timestamp}.pdf')
-            generate_pdf_report(md_content, pdf_path)
+            generate_pdf_report(raw, pdf_path)
             
             _report_status['status'] = 'done'
             _report_status['path'] = pdf_path
             _report_status['progress'] = 'Listo'
         except Exception as e:
+            import traceback
             _report_status['status'] = 'error'
-            _report_status['progress'] = str(e)
+            _report_status['progress'] = f"{e}\n{traceback.format_exc()[-500:]}"
     
     if _report_status['status'] == 'running':
         return jsonify({'status': 'running', 'progress': _report_status['progress']})
@@ -411,9 +420,11 @@ def report_status():
 
 @app.route('/api/download-report', methods=['GET'])
 def download_report():
-    if _report_status.get('path') and os.path.exists(_report_status['path']):
-        return send_file(_report_status['path'], as_attachment=True,
-                        download_name='Rappi_Reporte_Ejecutivo.pdf')
+    path = _report_status.get('path')
+    if path and os.path.exists(path):
+        return send_file(path, mimetype='application/pdf',
+                         as_attachment=True,
+                         download_name='Rappi_Reporte_Ejecutivo.pdf')
     return jsonify({'error': 'Reporte no disponible'}), 404
 
 

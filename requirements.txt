@@ -6,3 +6,9 @@ matplotlib>=3.7.0
 requests>=2.32.0
 numpy>=1.24.0
 python-dotenv>=1.0.0
+
+# Optional backends for faithful HTML -> PDF rendering
+# Install these if you want high-fidelity PDF output (Playwright/wkhtmltopdf preferred)
+pdfkit>=1.0.0
+playwright>=1.40.0
+weasyprint>=58.0

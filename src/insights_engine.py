@@ -3,370 +3,1540 @@ import numpy as np
 import json
 import requests
 import os
+import io
+import base64
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from datetime import datetime
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
-from datetime import datetime
-from .data_loader import load_data, WEEK_COLS_METRICS, WEEK_LABELS, COUNTRY_NAMES, METRIC_DESCRIPTIONS
+
+from .data_loader import (load_data, WEEK_COLS_METRICS, WEEK_LABELS,
+                           COUNTRY_NAMES, METRIC_DESCRIPTIONS, format_metric_value)
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
-GEMINI_URL = os.environ.get('GEMINI_URL', "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent")
+GEMINI_URL = os.environ.get('GEMINI_URL',
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent")
+
+BG_DARK  = '#FFFFFF'   # chart background → white
+BG_MID   = '#F8F9FA'   # subplot background → very light grey
+GRID_COL = '#E5E7EB'   # grid lines → light grey
+TEXT_COL = '#1F2937'   # text → near-black
+RED      = '#E03000'   # Rappi red (slightly darkened for white bg)
+ORANGE   = '#FF6B35'   # Rappi orange
+GREEN    = '#16A34A'   # green
+YELLOW   = '#D97706'   # amber
+BLUE     = '#2563EB'   # blue
+
+ALL_KEY_METRICS = [
+    'Perfect Orders', 'Lead Penetration', 'Gross Profit UE',
+    'Non-Pro PTC > OP', 'Restaurants SS > ATC CVR',
+    '% PRO Users Who Breakeven', 'MLTV Top Verticals Adoption',
+    'Turbo Adoption', '% Restaurants Sessions With Optimal Assortment',
+]
+
+# ──────────────────────────────────────────────────────────────
+# ANALYSIS FUNCTIONS
+# ──────────────────────────────────────────────────────────────
+
+def _pct_change_safe(new_val, old_val):
+    if pd.isna(new_val) or pd.isna(old_val):
+        return None
+    if abs(old_val) < 0.001:
+        return None
+    return (new_val - old_val) / abs(old_val)
 
 
-def detect_anomalies(df, threshold=0.10):
-    """Detect zones with drastic week-over-week changes."""
-    anomalies = []
-    df = df.dropna(subset=['L0W_ROLL', 'L1W_ROLL']).copy()
-    # Drop duplicate zone+metric rows, keep first
-    df = df.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE', 'METRIC'])
-    
-    # For metrics where value can cross zero, use absolute change instead
-    df['wow_change_abs'] = df['L0W_ROLL'] - df['L1W_ROLL']
-    
-    # Use pct change only when previous value is meaningfully non-zero
-    df = df[df['L1W_ROLL'].abs() > 0.001].copy()
-    df['wow_change'] = df['wow_change_abs'] / df['L1W_ROLL'].abs()
-    
-    # For Gross Profit UE use absolute change threshold (not %)
+def detect_anomalies(df, threshold=0.10, abs_threshold_numeric=0.5):
     from .data_loader import NUMERIC_METRICS
-    result_rows = []
+    df = df.dropna(subset=['L0W_ROLL', 'L1W_ROLL']).copy()
+    df = df.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE', 'METRIC'])
+    results = []
     for _, row in df.iterrows():
-        if row['METRIC'] in NUMERIC_METRICS:
-            # Use absolute change > 1.0 as threshold for numeric metrics
-            if abs(row['wow_change_abs']) > 1.0:
-                result_rows.append(row)
+        metric = row['METRIC']
+        cur, prev = row['L0W_ROLL'], row['L1W_ROLL']
+        abs_change = cur - prev
+        if metric in NUMERIC_METRICS:
+            if abs(abs_change) < abs_threshold_numeric:
+                continue
+            pct = _pct_change_safe(cur, prev)
+            if pct is None:
+                pct = abs_change
+            display = f"{abs_change:+.2f}"
         else:
-            if abs(row['wow_change']) >= threshold:
-                result_rows.append(row)
-    
-    for row in result_rows:
-        if row['METRIC'] in NUMERIC_METRICS:
-            change_display = f"{row['wow_change_abs']:+.2f}"
-            change_pct_val = row['wow_change_abs'] / max(abs(row['L1W_ROLL']), 0.01)
-        else:
-            change_display = f"{row['wow_change']*100:+.1f}%"
-            change_pct_val = row['wow_change']
-        
-        anomalies.append({
-            'zone': row['ZONE'],
-            'city': row['CITY'],
+            pct = _pct_change_safe(cur, prev)
+            if pct is None or abs(pct) < threshold:
+                continue
+            display = f"{pct*100:+.1f}%"
+        results.append({
+            'zone': row['ZONE'], 'city': row['CITY'],
             'country': COUNTRY_NAMES.get(row['COUNTRY'], row['COUNTRY']),
-            'metric': row['METRIC'],
-            'current': row['L0W_ROLL'],
-            'previous': row['L1W_ROLL'],
-            'change_pct': change_pct_val,
-            'change_display': change_display,
-            'direction': 'mejora' if change_pct_val > 0 else 'deterioro',
+            'country_code': row['COUNTRY'],
+            'zone_type': row.get('ZONE_TYPE', ''),
+            'metric': metric,
+            'current': cur, 'previous': prev,
+            'abs_change': abs_change,
+            'change_pct': pct,
+            'change_display': display,
+            'direction': 'mejora' if pct > 0 else 'deterioro',
         })
-    
-    anomalies.sort(key=lambda x: abs(x['change_pct']), reverse=True)
-    return anomalies[:20]
+    results.sort(key=lambda x: abs(x['change_pct']), reverse=True)
+    return results[:25]
 
 
 def detect_consistent_trends(df, n_weeks=3):
-    """Detect metrics declining consistently for 3+ weeks."""
-    trending = []
-    week_cols = WEEK_COLS_METRICS[-4:]  # Last 4 weeks
+    week_cols = WEEK_COLS_METRICS[-4:]
     df = df.dropna(subset=week_cols).copy()
     df = df.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE', 'METRIC'])
-    
+    declining, improving = [], []
     for _, row in df.iterrows():
         vals = [row[c] for c in week_cols]
-        if all(v is not None and not pd.isna(v) for v in vals):
-            diffs = [vals[i+1] - vals[i] for i in range(len(vals)-1)]
-            if all(d < 0 for d in diffs[-n_weeks:]):
-                base = abs(vals[0]) if vals[0] != 0 else 0.001
-                total_change = (vals[-1] - vals[0]) / base
-                # Cap extreme changes for display
-                total_change = max(min(total_change, 5.0), -5.0)
-                trending.append({
-                    'zone': row['ZONE'],
-                    'city': row['CITY'],
-                    'country': COUNTRY_NAMES.get(row['COUNTRY'], row['COUNTRY']),
-                    'metric': row['METRIC'],
-                    'values': [round(v, 4) for v in vals],
-                    'total_change_pct': total_change,
-                    'weeks_declining': n_weeks,
-                })
-    
-    trending.sort(key=lambda x: x['total_change_pct'])
-    return trending[:15]
+        if not all(v is not None and not pd.isna(v) for v in vals):
+            continue
+        diffs = [vals[i+1] - vals[i] for i in range(len(vals)-1)]
+        base = abs(vals[0]) if abs(vals[0]) > 0.001 else 0.001
+        total_change = max(min((vals[-1] - vals[0]) / base, 5.0), -5.0)
+        entry = {
+            'zone': row['ZONE'], 'city': row['CITY'],
+            'country': COUNTRY_NAMES.get(row['COUNTRY'], row['COUNTRY']),
+            'zone_type': row.get('ZONE_TYPE', ''),
+            'metric': row['METRIC'],
+            'values': [round(v, 4) for v in vals],
+            'total_change_pct': total_change,
+            'weeks': n_weeks,
+            'labels': WEEK_LABELS[-4:],
+        }
+        if all(d < 0 for d in diffs[-n_weeks:]):
+            declining.append(entry)
+        elif all(d > 0 for d in diffs[-n_weeks:]):
+            improving.append(entry)
+    declining.sort(key=lambda x: x['total_change_pct'])
+    improving.sort(key=lambda x: x['total_change_pct'], reverse=True)
+    return declining[:12], improving[:6]
 
 
 def detect_benchmarking_gaps(df):
-    """Compare zones within same country/type with divergent performance."""
     gaps = []
-    key_metrics = ['Perfect Orders', 'Lead Penetration', 'Gross Profit UE']
-    
-    for metric in key_metrics:
+    for metric in ALL_KEY_METRICS:
         metric_df = df[df['METRIC'] == metric].dropna(subset=['L0W_ROLL'])
-        
+        metric_df = metric_df.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE'])
         for (country, zone_type), grp in metric_df.groupby(['COUNTRY', 'ZONE_TYPE']):
-            if len(grp) < 3:
+            if len(grp) < 4:
                 continue
             q75 = grp['L0W_ROLL'].quantile(0.75)
             q25 = grp['L0W_ROLL'].quantile(0.25)
             gap = q75 - q25
-            
-            if gap > 0.1:
-                top_zone = grp.nlargest(1, 'L0W_ROLL').iloc[0]
-                bot_zone = grp.nsmallest(1, 'L0W_ROLL').iloc[0]
-                gaps.append({
-                    'metric': metric,
-                    'country': COUNTRY_NAMES.get(country, country),
-                    'zone_type': zone_type,
-                    'gap': gap,
-                    'top_zone': top_zone['ZONE'],
-                    'top_value': top_zone['L0W_ROLL'],
-                    'bottom_zone': bot_zone['ZONE'],
-                    'bottom_value': bot_zone['L0W_ROLL'],
-                    'zones_count': len(grp),
-                })
-    
-    gaps.sort(key=lambda x: x['gap'], reverse=True)
-    return gaps[:10]
+            median = grp['L0W_ROLL'].median()
+            rel_gap = gap / abs(median) if abs(median) > 0.001 else gap
+            if rel_gap < 0.2:
+                continue
+            top3 = grp.nlargest(3, 'L0W_ROLL')[['ZONE', 'CITY', 'L0W_ROLL']].to_dict('records')
+            bot3 = grp.nsmallest(3, 'L0W_ROLL')[['ZONE', 'CITY', 'L0W_ROLL']].to_dict('records')
+            gaps.append({
+                'metric': metric,
+                'country': COUNTRY_NAMES.get(country, country),
+                'country_code': country,
+                'zone_type': zone_type,
+                'gap_abs': gap,
+                'gap_rel': rel_gap,
+                'median': median,
+                'top_zones': top3,
+                'bot_zones': bot3,
+                'zones_count': len(grp),
+            })
+    gaps.sort(key=lambda x: x['gap_rel'], reverse=True)
+    return gaps[:12]
 
 
 def detect_correlations(df):
-    """Find metrics that tend to move together."""
-    pivot = df.pivot_table(index=['COUNTRY', 'CITY', 'ZONE'], columns='METRIC', values='L0W_ROLL')
+    pivot = df.pivot_table(
+        index=['COUNTRY', 'CITY', 'ZONE'], columns='METRIC', values='L0W_ROLL'
+    )
     pivot = pivot.dropna(thresh=4)
-    
     correlations = []
     cols = pivot.columns.tolist()
-    
     for i in range(len(cols)):
-        for j in range(i+1, len(cols)):
+        for j in range(i + 1, len(cols)):
             valid = pivot[[cols[i], cols[j]]].dropna()
-            if len(valid) > 10:
-                corr = valid[cols[i]].corr(valid[cols[j]])
-                if abs(corr) > 0.4:
-                    correlations.append({
-                        'metric_a': cols[i],
-                        'metric_b': cols[j],
-                        'correlation': corr,
-                        'strength': 'fuerte' if abs(corr) > 0.7 else 'moderada',
-                        'direction': 'positiva' if corr > 0 else 'negativa',
-                        'n_zones': len(valid),
-                    })
-    
+            if len(valid) < 15:
+                continue
+            corr = valid[cols[i]].corr(valid[cols[j]])
+            if abs(corr) > 0.35:
+                correlations.append({
+                    'metric_a': cols[i], 'metric_b': cols[j],
+                    'correlation': round(corr, 3),
+                    'strength': 'Fuerte' if abs(corr) > 0.65 else 'Moderada',
+                    'direction': 'positiva' if corr > 0 else 'negativa',
+                    'n_zones': len(valid),
+                })
     correlations.sort(key=lambda x: abs(x['correlation']), reverse=True)
-    return correlations[:8]
+    return correlations[:10]
 
 
 def detect_opportunities(df, orders_df):
-    """Find zones with high orders but underperforming metrics."""
-    opportunities = []
-    
     order_current = orders_df[['COUNTRY', 'CITY', 'ZONE', 'L0W_ROLL']].copy()
     order_current = order_current.rename(columns={'L0W_ROLL': 'orders'})
     order_current = order_current.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE'])
-    order_percentile = order_current['orders'].quantile(0.7)
-    high_order_zones = order_current[order_current['orders'] >= order_percentile]
-    
-    key_metrics = ['Perfect Orders', 'Lead Penetration', 'Gross Profit UE']
+    threshold_pct = order_current['orders'].quantile(0.65)
+    high_vol = order_current[order_current['orders'] >= threshold_pct]
+    opp_metrics = ['Perfect Orders', 'Lead Penetration', 'Non-Pro PTC > OP',
+                   'Gross Profit UE', 'Restaurants SS > ATC CVR']
     seen = set()
-    
-    for metric in key_metrics:
-        metric_df = df[df['METRIC'] == metric][['COUNTRY', 'CITY', 'ZONE', 'ZONE_TYPE', 'L0W_ROLL']].copy()
-        metric_df = metric_df.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE'])
-        merged = high_order_zones.merge(metric_df, on=['COUNTRY', 'CITY', 'ZONE'])
+    opportunities = []
+    for metric in opp_metrics:
+        mdf = df[df['METRIC'] == metric][['COUNTRY', 'CITY', 'ZONE', 'ZONE_TYPE', 'L0W_ROLL']].copy()
+        mdf = mdf.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE'])
+        merged = high_vol.merge(mdf, on=['COUNTRY', 'CITY', 'ZONE'])
         merged = merged.dropna(subset=['L0W_ROLL'])
-        
-        overall_median = df[df['METRIC'] == metric]['L0W_ROLL'].median()
-        
-        underperforming = merged[merged['L0W_ROLL'] < overall_median * 0.9]
-        underperforming = underperforming.sort_values('orders', ascending=False).head(5)
-        
-        for _, row in underperforming.iterrows():
+        overall_p50 = df[df['METRIC'] == metric]['L0W_ROLL'].median()
+        overall_p25 = df[df['METRIC'] == metric]['L0W_ROLL'].quantile(0.25)
+        underperf = merged[merged['L0W_ROLL'] <= overall_p25]
+        underperf = underperf.sort_values('orders', ascending=False).head(4)
+        for _, row in underperf.iterrows():
             key = (row['ZONE'], row['COUNTRY'], metric)
             if key in seen:
                 continue
             seen.add(key)
+            gap_pct = (overall_p50 - row['L0W_ROLL']) / abs(overall_p50) if abs(overall_p50) > 0.001 else 0
             opportunities.append({
-                'zone': row['ZONE'],
-                'city': row['CITY'],
+                'zone': row['ZONE'], 'city': row['CITY'],
                 'country': COUNTRY_NAMES.get(row['COUNTRY'], row['COUNTRY']),
                 'zone_type': row.get('ZONE_TYPE', 'N/A'),
                 'metric': metric,
                 'metric_value': row['L0W_ROLL'],
-                'orders': row['orders'],
-                'median_benchmark': overall_median,
-                'gap': overall_median - row['L0W_ROLL'],
+                'metric_value_fmt': format_metric_value(metric, row['L0W_ROLL']),
+                'benchmark_fmt': format_metric_value(metric, overall_p50),
+                'orders': int(row['orders']),
+                'gap_pct': gap_pct,
             })
-    
     opportunities.sort(key=lambda x: x['orders'], reverse=True)
-    return opportunities[:10]
+    return opportunities[:12]
+
+
+def country_scorecards(df, orders_df):
+    order_by_country = orders_df.groupby('COUNTRY')['L0W_ROLL'].sum().to_dict()
+    key = ['Perfect Orders', 'Lead Penetration', 'Non-Pro PTC > OP', 'Gross Profit UE', 'Turbo Adoption']
+    scorecards = []
+    for country in sorted(df['COUNTRY'].unique()):
+        row = {'country': COUNTRY_NAMES.get(country, country),
+               'country_code': country,
+               'total_orders': int(order_by_country.get(country, 0)),
+               'metrics': {}}
+        cdf = df[df['COUNTRY'] == country]
+        for m in key:
+            mdf = cdf[cdf['METRIC'] == m]['L0W_ROLL'].dropna()
+            prev_mdf = cdf[cdf['METRIC'] == m]['L1W_ROLL'].dropna()
+            if len(mdf):
+                median_val = mdf.median()
+                prev_val = prev_mdf.median() if len(prev_mdf) else None
+                wow = _pct_change_safe(median_val, prev_val) if prev_val else None
+                row['metrics'][m] = {
+                    'value': median_val,
+                    'fmt': format_metric_value(m, median_val),
+                    'wow': wow,
+                    'wow_fmt': f"{wow*100:+.1f}%" if wow is not None else '—',
+                }
+        scorecards.append(row)
+    scorecards.sort(key=lambda x: x['total_orders'], reverse=True)
+    return scorecards
 
 
 def compile_raw_insights():
     metrics_df, orders_df, _ = load_data()
-    
+    declining_trends, improving_trends = detect_consistent_trends(metrics_df)
     return {
         'anomalies': detect_anomalies(metrics_df),
-        'consistent_trends': detect_consistent_trends(metrics_df),
+        'declining_trends': declining_trends,
+        'improving_trends': improving_trends,
         'benchmarking_gaps': detect_benchmarking_gaps(metrics_df),
         'correlations': detect_correlations(metrics_df),
         'opportunities': detect_opportunities(metrics_df, orders_df),
+        'scorecards': country_scorecards(metrics_df, orders_df),
     }
 
 
-def generate_report_with_gemini(raw_insights: dict) -> str:
-    """Use Gemini to generate the executive report in markdown."""
-    
-    summary = json.dumps(raw_insights, ensure_ascii=False, default=str, indent=2)
-    
-    prompt = f"""Eres el analista senior de Rappi. Con base en los insights automáticos detectados en los datos operacionales, genera un REPORTE EJECUTIVO COMPLETO en español.
+# ──────────────────────────────────────────────────────────────
+# CHART GENERATORS
+# ──────────────────────────────────────────────────────────────
 
-DATOS DE INSIGHTS DETECTADOS:
-{summary[:8000]}
+def _fig_to_b64(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                facecolor=BG_DARK, edgecolor='none')   # BG_DARK is now white
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode()
 
-ESTRUCTURA DEL REPORTE (usa markdown):
-# 🚀 Reporte Ejecutivo de Operaciones — Rappi
-*Generado automáticamente | {datetime.now().strftime('%d/%m/%Y %H:%M')}*
 
----
-## 📋 Resumen Ejecutivo
-[3-5 hallazgos críticos en bullets con impacto en el negocio]
+def chart_anomalies_top(anomalies):
+    top = [a for a in anomalies if a['direction'] == 'deterioro'][:8]
+    if not top:
+        return None
+    labels = [f"{a['zone'][:28]} ({a['country'][:3]})" for a in top]
+    vals   = [min(abs(a['change_pct']) * 100, 300) for a in top]
+    fig, ax = plt.subplots(figsize=(8, max(3.5, len(top) * 0.52)))
+    fig.patch.set_facecolor(BG_DARK); ax.set_facecolor(BG_DARK)
+    bars = ax.barh(range(len(labels)), vals, color=RED, alpha=0.82, height=0.55)
+    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, color=TEXT_COL, fontsize=8)
+    ax.set_xlabel('Magnitud del cambio WoW', color=TEXT_COL, fontsize=8)
+    ax.set_title('Top Deterioros — Semana vs Semana Anterior', color=TEXT_COL, fontsize=10, fontweight='bold', pad=8)
+    max_v = max(vals) if vals else 1
+    ax.set_xlim(0, max_v * 1.30)   # extra right margin for labels
+    for bar, a in zip(bars, top):
+        ax.text(bar.get_width() + max_v * 0.015, bar.get_y() + bar.get_height() / 2,
+                a['change_display'], va='center', color=RED, fontsize=8, fontweight='bold')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
+    ax.tick_params(colors=TEXT_COL); ax.xaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.5)
+    ax.set_axisbelow(True); plt.tight_layout()
+    return _fig_to_b64(fig)
 
----
-## ⚠️ Anomalías Detectadas
-[Top anomalías: cambios bruscos semana a semana. Para cada una: zona, métrica, cambio %, qué podría significar para el negocio]
 
----
-## 📉 Tendencias Preocupantes
-[Métricas en deterioro consistente 3+ semanas. Menciona zonas específicas y la magnitud del deterioro]
+def chart_country_metric(scorecards, metric_name):
+    items = [(s['country'], s['metrics'][metric_name]) for s in scorecards if metric_name in s['metrics']]
+    if not items:
+        return None
+    countries = [i[0][:12] for i in items]
+    values    = [i[1]['value'] for i in items]
+    fmts      = [i[1]['fmt'] for i in items]
+    plot_vals = [v * 100 if (0 < abs(v) <= 1.5 and '%' in format_metric_value(metric_name, v)) else v for v in values]
+    fig, ax = plt.subplots(figsize=(7, 3.2))
+    fig.patch.set_facecolor(BG_DARK); ax.set_facecolor(BG_DARK)
+    colors = [RED if i % 2 == 0 else ORANGE for i in range(len(countries))]
+    x = np.arange(len(countries))
+    bars = ax.bar(x, plot_vals, color=colors, alpha=0.88, width=0.55)
+    ax.set_xticks(x); ax.set_xticklabels(countries, color=TEXT_COL, fontsize=8, rotation=30, ha='right')
+    ax.set_title(f'{metric_name} — Mediana por País', color=TEXT_COL, fontsize=9, fontweight='bold', pad=6)
+    max_v = max(abs(v) for v in plot_vals) if plot_vals else 1
+    ax.set_ylim(0, max_v * 1.25)
+    for bar, fmt in zip(bars, fmts):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max_v * 0.03,
+                fmt, ha='center', color=TEXT_COL, fontsize=7, fontweight='bold')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
+    ax.tick_params(colors=TEXT_COL); ax.yaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.4)
+    ax.set_axisbelow(True); plt.tight_layout()
+    return _fig_to_b64(fig)
 
----
-## 📊 Benchmarking: Brechas entre Zonas Similares
-[Zonas del mismo país/tipo con performance muy diferente. Identifica las más llamativas]
 
----
-## 🔗 Correlaciones entre Métricas
-[Relaciones estadísticas encontradas. Explica el impacto operacional de cada correlación]
+def chart_trend_sparklines(trends, title, color):
+    items = trends[:6]
+    if not items:
+        return None
+    n = len(items); cols = min(n, 3); rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.5, rows * 2.8))
+    fig.patch.set_facecolor(BG_DARK)
+    axes_flat = np.array(axes).flatten() if hasattr(axes, 'flatten') else [axes]
+    for i, (ax, entry) in enumerate(zip(axes_flat, items)):
+        ax.set_facecolor(BG_MID)
+        vals = entry['values']
+        x = np.arange(len(vals))
+        ax.plot(x, vals, color=color, linewidth=2, marker='o', markersize=4,
+                markerfacecolor='white', markeredgecolor=color, markeredgewidth=1.5)
+        ax.fill_between(x, vals, alpha=0.12, color=color)
+        ax.set_xticks(x)
+        ax.set_xticklabels(entry['labels'], fontsize=6, color=TEXT_COL, rotation=25, ha='right')
+        zone_label = entry['zone'][:22]
+        metric_label = entry['metric'][:24]
+        ax.set_title(f"{zone_label}\n{entry['country']} · {metric_label}",
+                     fontsize=7, color=TEXT_COL, fontweight='bold', pad=3)
+        ax.tick_params(colors=TEXT_COL, labelsize=6.5)
+        ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
+        ax.yaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.3)
+    for ax in axes_flat[n:]:
+        ax.set_visible(False)
+    fig.suptitle(title, color=TEXT_COL, fontsize=11, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    return _fig_to_b64(fig)
 
----
-## 💎 Oportunidades de Mejora
-[Zonas con alto volumen de órdenes pero métricas debajo del benchmark. Estas tienen el mayor potencial de impacto]
 
----
-## ✅ Recomendaciones Accionables
-[5-7 acciones concretas y específicas que el equipo de Ops/SP&A puede tomar esta semana]
+def chart_correlations(correlations):
+    top = correlations[:7]
+    if not top:
+        return None
+    # Short readable labels
+    labels = [f"{c['metric_a'][:18]}\nvs {c['metric_b'][:18]}" for c in top]
+    vals   = [c['correlation'] for c in top]
+    colors = [GREEN if v > 0 else RED for v in vals]
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    fig.patch.set_facecolor(BG_DARK); ax.set_facecolor(BG_DARK)
+    x = np.arange(len(labels))
+    bars = ax.bar(x, vals, color=colors, alpha=0.85, width=0.55)
+    ax.axhline(0, color=GRID_COL, linewidth=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, color=TEXT_COL, fontsize=7, rotation=0, ha='center')
+    ax.set_ylabel('Coef. de correlación (r)', color=TEXT_COL, fontsize=8)
+    ax.set_ylim(-1.15, 1.15)
+    ax.set_title('Correlaciones entre Métricas Operacionales', color=TEXT_COL, fontsize=10, fontweight='bold', pad=8)
+    for bar, c in zip(bars, top):
+        yoff = 0.05 if bar.get_height() >= 0 else -0.10
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + yoff,
+                f"r={c['correlation']:.2f}", ha='center', color=TEXT_COL, fontsize=8, fontweight='bold')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
+    ax.tick_params(colors=TEXT_COL); ax.yaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.4)
+    ax.set_axisbelow(True)
+    legend = [mpatches.Patch(color=GREEN, label='Positiva'), mpatches.Patch(color=RED, label='Negativa')]
+    ax.legend(handles=legend, facecolor=BG_MID, edgecolor=GRID_COL, labelcolor=TEXT_COL, fontsize=8,
+              loc='upper right')
+    plt.tight_layout()
+    return _fig_to_b64(fig)
 
----
-*Nota: Este reporte fue generado automáticamente. Los datos son indicativos y deben validarse con los equipos locales.*
 
-IMPORTANTE:
-- Sé específico con nombres de zonas, países y métricas
-- Cuantifica cuando sea posible (ej: "deterioro del 23%")
-- Las recomendaciones deben ser concretas y accionables para un equipo de operaciones
-- Usa el contexto de negocio de Rappi (marketplace, merchants, conversión, etc.)
-- Escribe para un Director de Operaciones o VP de SP&A
-"""
-    
+def chart_opportunities(opportunities):
+    if not opportunities:
+        return None
+    top = opportunities[:7]
+    labels = [f"{o['zone'][:24]} ({o['country'][:3]})" for o in top]
+    orders = [o['orders'] for o in top]
+    fig, ax = plt.subplots(figsize=(8, max(3.5, len(top) * 0.52)))
+    fig.patch.set_facecolor(BG_DARK); ax.set_facecolor(BG_DARK)
+    colors = [ORANGE if i % 2 == 0 else YELLOW for i in range(len(top))]
+    bars = ax.barh(range(len(labels)), orders, color=colors, alpha=0.88, height=0.55)
+    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, color=TEXT_COL, fontsize=8)
+    ax.set_xlabel('Órdenes semanales', color=TEXT_COL, fontsize=8)
+    ax.set_title('Zonas de Alto Volumen con Métricas Debajo del Benchmark',
+                 color=TEXT_COL, fontsize=10, fontweight='bold', pad=8)
+    max_o = max(orders) if orders else 1
+    ax.set_xlim(0, max_o * 1.20)
+    for bar, o in zip(bars, top):
+        label = f"{o['orders']:,} órd."
+        ax.text(bar.get_width() + max_o * 0.01, bar.get_y() + bar.get_height() / 2,
+                label, va='center', color=TEXT_COL, fontsize=7.5)
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
+    ax.tick_params(colors=TEXT_COL); ax.xaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.4)
+    ax.set_axisbelow(True); plt.tight_layout()
+    return _fig_to_b64(fig)
+
+
+# ──────────────────────────────────────────────────────────────
+# GEMINI — EXECUTIVE NARRATIVE ONLY
+# ──────────────────────────────────────────────────────────────
+
+def generate_executive_summary(raw_insights: dict) -> dict:
+    top_anomalies = raw_insights['anomalies'][:8]
+    top_opps      = raw_insights['opportunities'][:5]
+    top_corr      = raw_insights['correlations'][:4]
+    declining     = raw_insights['declining_trends'][:5]
+
+    prompt = f"""Eres analista senior de Rappi. Con base en estos datos operacionales, escribe en español un resumen ejecutivo CONCISO y ACCIONABLE para un Director de Operaciones o VP de SP&A.
+
+ANOMALÍAS (cambios WoW más grandes):
+{json.dumps(top_anomalies, ensure_ascii=False, default=str)[:2500]}
+
+TENDENCIAS EN DETERIORO (3+ semanas):
+{json.dumps(declining, ensure_ascii=False, default=str)[:1200]}
+
+OPORTUNIDADES (alto volumen, bajo rendimiento):
+{json.dumps(top_opps, ensure_ascii=False, default=str)[:1200]}
+
+CORRELACIONES CLAVE:
+{json.dumps(top_corr, ensure_ascii=False, default=str)[:700]}
+
+Devuelve EXACTAMENTE este JSON (sin markdown, sin texto extra):
+{{
+  "hallazgos_criticos": ["hallazgo 1 con dato concreto y país", "hallazgo 2", "hallazgo 3", "hallazgo 4", "hallazgo 5"],
+  "narrativa": "2 párrafos ejecutivos. Menciona países y zonas específicas. Explica impacto en negocio (revenue, experiencia de usuario, retención de merchants). Conecta las anomalías con oportunidades.",
+  "recomendaciones": ["Acción concreta 1 con zona/métrica específica", "Acción 2", "Acción 3", "Acción 4", "Acción 5", "Acción 6"],
+  "alerta_critica": "1 frase. El hallazgo MÁS urgente esta semana."
+}}"""
+
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 4096,
+            "temperature": 0.4, "maxOutputTokens": 2048,
+            "responseMimeType": "application/json"
         }
     }
-    
     try:
-        resp = requests.post(
-            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-            json=payload,
-            timeout=60
-        )
+        resp = requests.post(f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                             json=payload, timeout=60)
         resp.raise_for_status()
-        data = resp.json()
-        return data['candidates'][0]['content']['parts'][0]['text']
+        text = resp.json()['candidates'][0]['content']['parts'][0]['text']
+        return json.loads(text.strip())
     except Exception as e:
-        return f"Error generando reporte: {str(e)}"
+        # Fallback without Gemini
+        anoms = raw_insights.get('anomalies', [])
+        corrs = raw_insights.get('correlations', [])
+        return {
+            "hallazgos_criticos": [
+                f"Se detectaron {len(anoms)} anomalías WoW en múltiples métricas y países.",
+                f"{len(declining)} zonas en deterioro consistente 3+ semanas consecutivas.",
+                f"{len(top_opps)} zonas de alto volumen por debajo del benchmark en métricas clave.",
+                f"Correlación {corrs[0]['strength'].lower()} ({corrs[0]['correlation']:.2f}) entre {corrs[0]['metric_a']} y {corrs[0]['metric_b']}." if corrs else "Correlaciones moderadas entre métricas de conversión.",
+                f"Brechas de benchmarking detectadas en {len(raw_insights.get('benchmarking_gaps',[]))} combinaciones país/tipo.",
+            ],
+            "narrativa": "El análisis automático detectó patrones de deterioro en múltiples métricas. Se recomienda revisar las zonas con mayor volumen de órdenes que están por debajo del benchmark, ya que representan el mayor potencial de impacto. Las correlaciones detectadas sugieren que mejoras tempranas en el funnel de conversión tienen efecto positivo en otras métricas clave.",
+            "recomendaciones": [
+                "Revisar operación en las zonas con deterioro WoW >20% e identificar causa raíz esta semana.",
+                "Escalar al equipo local las zonas con tendencia negativa en 3+ semanas consecutivas.",
+                "Priorizar mejora de Perfect Orders en zonas de alto volumen por debajo del benchmark.",
+                "Analizar zonas con mejora excepcional para documentar y replicar buenas prácticas.",
+                "Cruzar Lead Penetration baja con bajo Perfect Orders para identificar zonas de doble riesgo.",
+                "Revisar estructura de costos en zonas con Gross Profit UE negativo o en caída.",
+            ],
+            "alerta_critica": f"{anoms[0]['zone']} ({anoms[0]['country']}) — {anoms[0]['metric']}: {anoms[0]['change_display']} WoW." if anoms else "Revisar tendencias de deterioro consistente esta semana."
+        }
 
 
-def generate_pdf_report(markdown_content: str, output_path: str) -> str:
-    """Convert markdown report to PDF using ReportLab."""
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import cm
-    from reportlab.lib.colors import HexColor, white, black
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER
-    import re
-    
-    doc = SimpleDocTemplate(
-        output_path,
-        pagesize=A4,
-        topMargin=2*cm, bottomMargin=2*cm,
-        leftMargin=2.5*cm, rightMargin=2.5*cm
+# ──────────────────────────────────────────────────────────────
+# HTML REPORT BUILDER
+# ──────────────────────────────────────────────────────────────
+
+def _img_tag(b64, alt=''):
+    if not b64:
+        return '<div style="padding:20px;text-align:center;color:#444;font-size:12px">Sin datos suficientes</div>'
+    return f'<img src="data:image/png;base64,{b64}" alt="{alt}" style="width:100%;border-radius:10px;display:block">'
+
+
+def _wow_badge(direction, display):
+    color = GREEN if direction == 'mejora' else RED
+    bg    = 'rgba(34,197,94,0.12)' if direction == 'mejora' else 'rgba(255,68,31,0.12)'
+    arrow = '▲' if direction == 'mejora' else '▼'
+    return (f'<span style="background:{bg};color:{color};padding:2px 8px;'
+            f'border-radius:100px;font-size:12px;font-weight:700">{arrow} {display}</span>')
+
+
+def generate_html_report(raw_insights: dict, executive_summary: dict) -> str:
+    now         = datetime.now().strftime('%d/%m/%Y %H:%M')
+    scorecards  = raw_insights.get('scorecards', [])
+    anomalies   = raw_insights.get('anomalies', [])
+    declining   = raw_insights.get('declining_trends', [])
+    improving   = raw_insights.get('improving_trends', [])
+    gaps        = raw_insights.get('benchmarking_gaps', [])
+    correlations= raw_insights.get('correlations', [])
+    opps        = raw_insights.get('opportunities', [])
+    hallazgos   = executive_summary.get('hallazgos_criticos', [])
+    narrativa   = executive_summary.get('narrativa', '')
+    recomendaciones = executive_summary.get('recomendaciones', [])
+    alerta      = executive_summary.get('alerta_critica', '')
+
+    # Charts
+    ch_anom    = chart_anomalies_top(anomalies)
+    ch_po      = chart_country_metric(scorecards, 'Perfect Orders')
+    ch_lp      = chart_country_metric(scorecards, 'Lead Penetration')
+    ch_gp      = chart_country_metric(scorecards, 'Gross Profit UE')
+    ch_conv    = chart_country_metric(scorecards, 'Non-Pro PTC > OP')
+    ch_turbo   = chart_country_metric(scorecards, 'Turbo Adoption')
+    ch_dec     = chart_trend_sparklines(declining, 'Zonas en Deterioro Consistente (3+ semanas)', RED)
+    ch_imp     = chart_trend_sparklines(improving, 'Zonas con Mejora Consistente (3+ semanas)', GREEN)
+    ch_corr    = chart_correlations(correlations)
+    ch_opp     = chart_opportunities(opps)
+
+    # ── Scorecard table ──
+    key_sc = ['Perfect Orders', 'Lead Penetration', 'Non-Pro PTC > OP', 'Gross Profit UE', 'Turbo Adoption']
+    sc_headers = ''.join(f'<th>{m}</th>' for m in key_sc)
+    sc_rows = ''
+    for s in scorecards:
+        cells = (f'<td style="font-weight:700;color:#eee;white-space:nowrap">{s["country"]}</td>'
+                 f'<td style="color:#9999BB;text-align:center">{s["total_orders"]:,}</td>')
+        for m in key_sc:
+            if m in s['metrics']:
+                d = s['metrics'][m]
+                wc = GREEN if d['wow'] and d['wow'] > 0 else (RED if d['wow'] and d['wow'] < 0 else '#9999BB')
+                cells += (f'<td style="text-align:center">'
+                          f'<strong style="color:#eee">{d["fmt"]}</strong>'
+                          f'<br><span style="font-size:10px;color:{wc}">{d["wow_fmt"]}</span></td>')
+            else:
+                cells += '<td style="text-align:center;color:#444">—</td>'
+        sc_rows += f'<tr>{cells}</tr>'
+
+    # ── Anomalies table ──
+    anom_rows = ''
+    for a in anomalies[:15]:
+        cur_fmt = format_metric_value(a['metric'], a['current'])
+        pre_fmt = format_metric_value(a['metric'], a['previous'])
+        anom_rows += (
+            f'<tr><td><strong style="color:#eee">{a["zone"]}</strong>'
+            f'<br><span style="font-size:11px;color:#9999BB">{a["city"]} · {a["country"]}</span></td>'
+            f'<td style="font-size:11px;color:#9999BB">{a["zone_type"]}</td>'
+            f'<td style="font-size:12px">{a["metric"]}</td>'
+            f'<td style="text-align:center">{_wow_badge(a["direction"], a["change_display"])}</td>'
+            f'<td style="text-align:center;font-family:monospace;font-size:12px">'
+            f'{pre_fmt} → <strong style="color:#eee">{cur_fmt}</strong></td></tr>'
+        )
+
+    # ── Trends table ──
+    trend_rows = ''
+    for t in declining[:10]:
+        vals_html = ' → '.join(
+            f'<span style="color:#9999BB;font-size:10px">{format_metric_value(t["metric"], v)}</span>'
+            for v in t['values']
+        )
+        trend_rows += (
+            f'<tr><td><strong style="color:#eee">{t["zone"]}</strong>'
+            f'<br><span style="font-size:11px;color:#9999BB">{t["city"]} · {t["country"]}</span></td>'
+            f'<td style="font-size:12px">{t["metric"]}</td>'
+            f'<td style="text-align:center"><span style="color:{RED};font-weight:700">'
+            f'{t["total_change_pct"]*100:.1f}%</span></td>'
+            f'<td style="font-size:11px">{vals_html}</td></tr>'
+        )
+
+    # ── Improving table ──
+    impr_rows = ''
+    for t in improving[:6]:
+        impr_rows += (
+            f'<tr><td><strong style="color:#eee">{t["zone"]}</strong>'
+            f'<br><span style="font-size:11px;color:#9999BB">{t["city"]} · {t["country"]}</span></td>'
+            f'<td style="font-size:12px">{t["metric"]}</td>'
+            f'<td style="text-align:center"><span style="color:{GREEN};font-weight:700">'
+            f'+{abs(t["total_change_pct"]*100):.1f}%</span></td></tr>'
+        )
+
+    # ── Gaps table ──
+    gaps_rows = ''
+    for g in gaps[:10]:
+        top_z = g['top_zones'][0] if g['top_zones'] else {}
+        bot_z = g['bot_zones'][0]  if g['bot_zones']  else {}
+        top_fmt = format_metric_value(g['metric'], top_z.get('L0W_ROLL', 0))
+        bot_fmt = format_metric_value(g['metric'], bot_z.get('L0W_ROLL', 0))
+        gaps_rows += (
+            f'<tr><td style="font-weight:600;color:#eee">{g["country"]}</td>'
+            f'<td style="font-size:12px;color:#9999BB">{g["zone_type"]}</td>'
+            f'<td style="font-size:12px">{g["metric"]}</td>'
+            f'<td><span style="color:{GREEN};font-weight:700">{top_fmt}</span>'
+            f'<br><span style="font-size:10px;color:#9999BB">{top_z.get("ZONE","")[:28]}</span></td>'
+            f'<td><span style="color:{RED};font-weight:700">{bot_fmt}</span>'
+            f'<br><span style="font-size:10px;color:#9999BB">{bot_z.get("ZONE","")[:28]}</span></td>'
+            f'<td style="text-align:center;color:{YELLOW}">{g["zones_count"]}</td></tr>'
+        )
+
+    # ── Correlations table ──
+    corr_rows = ''
+    for c in correlations:
+        bar_w = int(abs(c['correlation']) * 100)
+        bc    = GREEN if c['correlation'] > 0 else RED
+        bg_tag= 'rgba(34,197,94,0.1)' if c['direction'] == 'positiva' else 'rgba(255,68,31,0.1)'
+        corr_rows += (
+            f'<tr><td style="font-size:12px">{c["metric_a"]}</td>'
+            f'<td style="font-size:12px">{c["metric_b"]}</td>'
+            f'<td style="text-align:center">'
+            f'<div style="background:#1C1C2E;border-radius:100px;height:7px;overflow:hidden;margin-bottom:3px">'
+            f'<div style="width:{bar_w}%;background:{bc};height:100%;border-radius:100px"></div></div>'
+            f'<span style="font-size:11px;color:{bc};font-weight:700">r = {c["correlation"]:.3f}</span></td>'
+            f'<td style="text-align:center"><span style="background:{bg_tag};color:{bc};'
+            f'padding:2px 10px;border-radius:100px;font-size:11px;font-weight:600">'
+            f'{c["strength"]} · {c["direction"]}</span></td>'
+            f'<td style="text-align:center;font-size:11px;color:#9999BB">{c["n_zones"]}</td></tr>'
+        )
+
+    # ── Opportunities table ──
+    opp_rows = ''
+    for o in opps:
+        gap_pct = abs(o['gap_pct']) * 100
+        opp_rows += (
+            f'<tr><td><strong style="color:#eee">{o["zone"]}</strong>'
+            f'<br><span style="font-size:11px;color:#9999BB">{o["city"]} · {o["country"]}</span></td>'
+            f'<td style="font-size:12px;color:#9999BB">{o["zone_type"]}</td>'
+            f'<td style="font-size:12px">{o["metric"]}</td>'
+            f'<td style="text-align:center;font-family:monospace">'
+            f'<span style="color:{RED};font-weight:700">{o["metric_value_fmt"]}</span>'
+            f'<span style="color:#555;font-size:10px"> vs </span>'
+            f'<span style="color:{GREEN};font-weight:700">{o["benchmark_fmt"]}</span></td>'
+            f'<td style="text-align:center;font-weight:700;color:#eee">{o["orders"]:,}</td>'
+            f'<td style="min-width:100px">'
+            f'<div style="background:#1C1C2E;border-radius:100px;height:7px;overflow:hidden;margin-bottom:3px">'
+            f'<div style="width:{min(gap_pct,100):.0f}%;background:{ORANGE};height:100%;border-radius:100px"></div></div>'
+            f'<span style="font-size:10px;color:{ORANGE}">{gap_pct:.0f}% debajo</span></td></tr>'
+        )
+
+    # ── Hallazgos & recs ──
+    hallazgos_html = ''.join(
+        f'<div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:10px">'
+        f'<span style="color:{RED};font-size:16px;flex-shrink:0;margin-top:2px">◆</span>'
+        f'<span style="color:#D0D0E8;font-size:13.5px;line-height:1.6">{h}</span></div>'
+        for h in hallazgos
     )
-    
-    RAPPI_RED = HexColor('#FF441F')
-    RAPPI_DARK = HexColor('#1A1A2E')
-    LIGHT_GRAY = HexColor('#F5F5F5')
-    MID_GRAY = HexColor('#888888')
-    
-    styles = getSampleStyleSheet()
-    
-    style_h1 = ParagraphStyle('h1', fontName='Helvetica-Bold', fontSize=22,
-                               textColor=RAPPI_RED, spaceAfter=6, spaceBefore=0)
-    style_h2 = ParagraphStyle('h2', fontName='Helvetica-Bold', fontSize=14,
-                               textColor=RAPPI_DARK, spaceAfter=4, spaceBefore=14,
-                               borderPad=4)
-    style_h3 = ParagraphStyle('h3', fontName='Helvetica-Bold', fontSize=11,
-                               textColor=RAPPI_DARK, spaceAfter=3, spaceBefore=8)
-    style_body = ParagraphStyle('body', fontName='Helvetica', fontSize=9.5,
-                                 leading=14, textColor=HexColor('#333333'), spaceAfter=4)
-    style_bullet = ParagraphStyle('bullet', fontName='Helvetica', fontSize=9.5,
-                                   leading=14, textColor=HexColor('#333333'),
-                                   leftIndent=16, spaceAfter=3)
-    style_italic = ParagraphStyle('italic', fontName='Helvetica-Oblique', fontSize=8.5,
-                                   textColor=MID_GRAY, spaceAfter=8)
-    
+    narrativa_html = ''.join(
+        f'<p style="margin-bottom:12px;line-height:1.75;color:#B8B8D4;font-size:13.5px">{p.strip()}</p>'
+        for p in narrativa.split('\n') if p.strip()
+    )
+    rec_html = ''.join(
+        f'<li style="margin-bottom:8px;padding:11px 14px;background:#1C1C2E;border-radius:8px;'
+        f'border-left:3px solid {RED};font-size:13px;color:#D8D8F0;list-style:none">'
+        f'<span style="color:{ORANGE};font-weight:700;margin-right:8px">→</span>{rec}</li>'
+        for rec in recomendaciones
+    )
+
+    # ── HTML OUTPUT ──
+    return f'''<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reporte Ejecutivo Rappi · {now}</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:"DM Sans",sans-serif;background:#0B0B14;color:#EEEEF5;min-height:100vh}}
+.page{{max-width:1120px;margin:0 auto;padding:40px 24px 80px}}
+.report-header{{background:linear-gradient(135deg,#13131F,#1C1C2E);border:1px solid #2E2E45;
+  border-radius:16px;padding:32px 36px;margin-bottom:24px;position:relative;overflow:hidden}}
+.report-header::before{{content:"";position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,{RED},{ORANGE})}}
+.report-title{{font-size:27px;font-weight:700;letter-spacing:-0.5px;margin-bottom:6px}}
+.report-title span{{color:{RED}}}
+.report-meta{{font-size:13px;color:#6666AA;margin-bottom:10px}}
+.report-badge{{display:inline-block;background:rgba(255,68,31,0.1);color:{ORANGE};
+  padding:4px 14px;border-radius:100px;font-size:12px;font-weight:600;
+  border:1px solid rgba(255,68,31,0.2)}}
+.alert-banner{{background:rgba(255,68,31,0.07);border:1px solid rgba(255,68,31,0.3);
+  border-left:4px solid {RED};border-radius:10px;padding:14px 18px;
+  margin-bottom:24px;display:flex;align-items:center;gap:12px}}
+.alert-text{{font-size:13.5px;color:#FFB0A0;font-weight:500}}
+.kpi-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:12px;margin-bottom:24px}}
+.kpi-card{{background:#13131F;border:1px solid #2E2E45;border-radius:12px;
+  padding:18px 16px;text-align:center}}
+.kpi-value{{font-size:28px;font-weight:700;line-height:1}}
+.kpi-label{{font-size:10px;color:#6666AA;margin-top:6px;text-transform:uppercase;letter-spacing:0.5px}}
+.section{{background:#13131F;border:1px solid #2E2E45;border-radius:14px;
+  padding:26px 28px;margin-bottom:22px}}
+.section-title{{font-size:17px;font-weight:700;margin-bottom:4px}}
+.section-sub{{font-size:12px;color:#6666AA;margin-bottom:18px}}
+.divider{{height:1px;background:#2E2E45;margin:18px 0}}
+.chart-grid-2{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}}
+.chart-grid-3{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin:14px 0}}
+.chart-box{{background:#1C1C2E;border:1px solid #2E2E45;border-radius:10px;overflow:hidden;padding:4px}}
+.chart-box.full{{grid-column:1/-1}}
+.dt{{width:100%;border-collapse:collapse;font-size:13px}}
+.dt th{{background:#1C1C2E;color:#9999BB;padding:9px 11px;text-align:left;
+  font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.4px;
+  border-bottom:1px solid #2E2E45}}
+.dt td{{padding:9px 11px;border-bottom:1px solid #1A1A2A;vertical-align:middle}}
+.dt tr:hover td{{background:rgba(255,255,255,0.02)}}
+.dt tr:last-child td{{border-bottom:none}}
+.sc{{width:100%;border-collapse:collapse;font-size:12px}}
+.sc th{{background:rgba(255,68,31,0.08);color:{ORANGE};padding:9px 11px;text-align:center;
+  font-weight:600;font-size:11px;border:1px solid #2E2E45;
+  text-transform:uppercase;letter-spacing:0.3px}}
+.sc th:first-child{{text-align:left}}
+.sc td{{padding:9px 11px;border:1px solid #1A1A2A;text-align:center}}
+.sc tr:hover td{{background:rgba(255,255,255,0.02)}}
+.info-box{{background:#1C1C2E;border-left:3px solid {BLUE};border-radius:8px;
+  padding:13px 16px;margin-top:14px;font-size:13px;color:#9999BB}}
+.footer{{text-align:center;color:#3A3A55;font-size:12px;margin-top:40px;
+  padding-top:20px;border-top:1px solid #1A1A2A}}
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- HEADER -->
+<div class="report-header">
+  <div class="report-title">🦊 Reporte Ejecutivo de Operaciones — <span>Rappi</span></div>
+  <div class="report-meta">Generado automáticamente · {now} · Análisis de {len(scorecards)} países, {len(anomalies)+len(declining)} alertas detectadas</div>
+  <div class="report-badge">⚡ SP&amp;A Intelligence Suite · Gemini 2.5 Flash</div>
+</div>
+
+<!-- ALERT -->
+{"" if not alerta else f'<div class="alert-banner"><div style="font-size:22px;flex-shrink:0">🚨</div><div class="alert-text"><strong>Alerta Crítica:</strong> {alerta}</div></div>'}
+
+<!-- KPI STRIP -->
+<div class="kpi-grid">
+  <div class="kpi-card"><div class="kpi-value" style="color:{RED}">{len(anomalies)}</div><div class="kpi-label">Anomalías WoW</div></div>
+  <div class="kpi-card"><div class="kpi-value" style="color:{YELLOW}">{len(declining)}</div><div class="kpi-label">Tendencias Negativas</div></div>
+  <div class="kpi-card"><div class="kpi-value" style="color:{GREEN}">{len(improving)}</div><div class="kpi-label">Tendencias Positivas</div></div>
+  <div class="kpi-card"><div class="kpi-value" style="color:{ORANGE}">{len(opps)}</div><div class="kpi-label">Oportunidades</div></div>
+  <div class="kpi-card"><div class="kpi-value" style="color:{BLUE}">{len(gaps)}</div><div class="kpi-label">Brechas Benchmark</div></div>
+  <div class="kpi-card"><div class="kpi-value" style="color:#9999BB">{len(scorecards)}</div><div class="kpi-label">Países</div></div>
+</div>
+
+<!-- EXECUTIVE SUMMARY -->
+<div class="section">
+  <div class="section-title">📋 Resumen Ejecutivo</div>
+  <div class="section-sub">Análisis generado por IA · Para VP Operations &amp; SP&amp;A Leadership</div>
+  <div style="margin-bottom:18px">{hallazgos_html}</div>
+  <div class="divider"></div>
+  {narrativa_html}
+</div>
+
+<!-- COUNTRY SCORECARDS -->
+<div class="section">
+  <div class="section-title">🌎 Scorecard por País — Métricas Clave</div>
+  <div class="section-sub">Mediana por país · WoW = variación vs semana anterior · Ordenado por volumen de órdenes</div>
+  <div style="overflow-x:auto">
+    <table class="sc">
+      <thead><tr><th style="text-align:left">País</th><th>Órdenes</th>{sc_headers}</tr></thead>
+      <tbody>{sc_rows}</tbody>
+    </table>
+  </div>
+  <div class="chart-grid-2" style="margin-top:18px">
+    <div class="chart-box">{_img_tag(ch_po, 'Perfect Orders')}</div>
+    <div class="chart-box">{_img_tag(ch_lp, 'Lead Penetration')}</div>
+    <div class="chart-box">{_img_tag(ch_gp, 'Gross Profit UE')}</div>
+    <div class="chart-box">{_img_tag(ch_conv, 'Conversión No-Pro')}</div>
+  </div>
+</div>
+
+<!-- ANOMALIES -->
+<div class="section">
+  <div class="section-title">⚠️ Anomalías — Cambios Drásticos Semana vs Semana</div>
+  <div class="section-sub">Variación &gt;10% WoW en métricas de ratio · O cambio absoluto significativo en métricas numéricas</div>
+  <div class="chart-box full" style="margin-bottom:16px">{_img_tag(ch_anom, 'Top deterioros')}</div>
+  <div style="overflow-x:auto">
+    <table class="dt">
+      <thead><tr><th>Zona</th><th>Tipo</th><th>Métrica</th><th>Cambio WoW</th><th>Anterior → Actual</th></tr></thead>
+      <tbody>{anom_rows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- TRENDS -->
+<div class="section">
+  <div class="section-title">📉 Tendencias Preocupantes — Deterioro 3+ Semanas</div>
+  <div class="section-sub">Zonas con declive sostenido — señal de problemas estructurales que requieren intervención</div>
+  {_img_tag(ch_dec, 'Tendencias deterioro')}
+  <div style="overflow-x:auto;margin-top:14px">
+    <table class="dt">
+      <thead><tr><th>Zona</th><th>Métrica</th><th>Cambio Total</th><th>Evolución (últimas 4 semanas)</th></tr></thead>
+      <tbody>{trend_rows}</tbody>
+    </table>
+  </div>
+  {f'''<div class="divider"></div>
+  <div class="section-title" style="font-size:15px;color:{GREEN};margin-bottom:12px">📈 Zonas con Mejora Consistente — Casos a Replicar</div>
+  {_img_tag(ch_imp, "Tendencias mejora")}
+  <div style="overflow-x:auto;margin-top:12px">
+    <table class="dt"><thead><tr><th>Zona</th><th>Métrica</th><th>Mejora Total</th></tr></thead>
+    <tbody>{impr_rows}</tbody></table>
+  </div>''' if improving else ''}
+</div>
+
+<!-- BENCHMARKING -->
+<div class="section">
+  <div class="section-title">📊 Benchmarking — Brechas entre Zonas del Mismo País y Tipo</div>
+  <div class="section-sub">Mismo contexto geográfico y socioeconómico, resultados distintos — indica oportunidad de mejora</div>
+  <div style="overflow-x:auto">
+    <table class="dt">
+      <thead><tr><th>País</th><th>Tipo de Zona</th><th>Métrica</th><th>Zona Top ▲</th><th>Zona Débil ▼</th><th>Zonas</th></tr></thead>
+      <tbody>{gaps_rows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- CORRELATIONS -->
+<div class="section">
+  <div class="section-title">🔗 Correlaciones entre Métricas</div>
+  <div class="section-sub">Relaciones estadísticas — útiles para priorizar intervenciones con efecto cascada</div>
+  {_img_tag(ch_corr, 'Correlaciones')}
+  <div style="overflow-x:auto;margin-top:14px">
+    <table class="dt">
+      <thead><tr><th>Métrica A</th><th>Métrica B</th><th>Intensidad</th><th>Característica</th><th>N° Zonas</th></tr></thead>
+      <tbody>{corr_rows}</tbody>
+    </table>
+  </div>
+  <div class="info-box">
+    💡 <strong style="color:#eee">¿Cómo usarlo?</strong>
+    Una correlación positiva fuerte (r &gt; 0.65) significa que ambas métricas suben juntas.
+    Mejorar una puede arrastrar a la otra. Priorizá intervenciones en el par de métricas con mayor correlación
+    y menor nivel actual para maximizar el impacto operacional.
+  </div>
+</div>
+
+<!-- OPPORTUNITIES -->
+<div class="section">
+  <div class="section-title">💎 Oportunidades de Mayor Impacto</div>
+  <div class="section-sub">Zonas con alto volumen de órdenes y métricas por debajo del benchmark — mayor potencial de impacto inmediato</div>
+  {_img_tag(ch_opp, 'Oportunidades')}
+  <div style="overflow-x:auto;margin-top:14px">
+    <table class="dt">
+      <thead><tr><th>Zona</th><th>Tipo</th><th>Métrica con Gap</th><th>Actual vs Benchmark</th><th>Órdenes/sem</th><th>Gap</th></tr></thead>
+      <tbody>{opp_rows}</tbody>
+    </table>
+  </div>
+</div>
+
+<!-- RECOMMENDATIONS -->
+<div class="section">
+  <div class="section-title">✅ Recomendaciones Accionables para Esta Semana</div>
+  <div class="section-sub">Priorizadas por potencial de impacto en negocio</div>
+  <ul style="list-style:none;padding:0">{rec_html}</ul>
+</div>
+
+<div class="footer">
+  Rappi Analytics Intelligence Suite · Reporte generado el {now}<br>
+  Datos indicativos — validar con equipos locales antes de tomar decisiones.
+</div>
+</div>
+</body>
+</html>'''
+
+
+def generate_report_with_gemini(raw_insights: dict) -> str:
+    executive_summary = generate_executive_summary(raw_insights)
+    raw_insights['executive_summary'] = executive_summary
+    return generate_html_report(raw_insights, executive_summary)
+
+
+def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
+    """Professional PDF report — ReportLab only, no browser needed."""
+    import re, base64 as b64lib
+    from io import BytesIO
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        Image as RLImage, HRFlowable, PageBreak, KeepTogether
+    )
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib.colors import HexColor
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+
+    # ── Palette ───────────────────────────────────────────────────
+    CR  = HexColor('#E03000')   # Rappi red
+    CO  = HexColor('#FF6B35')   # orange
+    CG  = HexColor('#16A34A')   # green
+    CY  = HexColor('#D97706')   # amber
+    CB  = HexColor('#2563EB')   # blue
+    CSF = HexColor('#F8F9FA')   # section bg
+    CCA = HexColor('#F1F3F5')   # card/table header
+    CBR = HexColor('#DEE2E6')   # border
+    CTX = HexColor('#1F2937')   # main text
+    CMT = HexColor('#6B7280')   # muted text
+    CWH = HexColor('#FFFFFF')   # white
+
+    W, H = A4
+    LM = RM = 18*mm
+    CW = W - LM - RM   # content width ~159mm
+
+    # ── Style factory ─────────────────────────────────────────────
+    def ps(name, font='Helvetica', size=9, color=CTX, **kw):
+        return ParagraphStyle(name, fontName=font, fontSize=size, textColor=color, **kw)
+
+    sT1  = ps('T1','Helvetica-Bold',20,CR, spaceAfter=2, leading=24)
+    sT2  = ps('T2','Helvetica-Bold',12,CO, spaceAfter=6, leading=15)
+    sMt  = ps('Mt','Helvetica',8,CMT, spaceAfter=8)
+    sH2  = ps('H2','Helvetica-Bold',12,CTX, spaceBefore=4, spaceAfter=3, leading=15)
+    sH3  = ps('H3','Helvetica-Bold',10,CR,  spaceBefore=6, spaceAfter=2)
+    sH3g = ps('H3g','Helvetica-Bold',10,CG, spaceBefore=6, spaceAfter=2)
+    sBod = ps('Bd','Helvetica',9,CMT,  leading=13, spaceAfter=4)
+    sBul = ps('Bl','Helvetica',9,CTX,  leading=13, leftIndent=10, spaceAfter=3)
+    sInt = ps('It','Helvetica-Oblique',8.5,CMT, leading=12, spaceAfter=3,
+               leftIndent=6, borderPad=4)
+    sTH  = ps('TH','Helvetica-Bold',7.5,CO,  alignment=TA_LEFT)
+    sTD  = ps('TD','Helvetica',8,CTX,  leading=11)
+    sTDm = ps('TDm','Helvetica',7.5,CMT, leading=10)
+    sTDg = ps('TDg','Helvetica-Bold',8,CG)
+    sTDr = ps('TDr','Helvetica-Bold',8,CR)
+    sCtr = ps('Ct','Helvetica',8,CTX,  alignment=TA_CENTER, leading=11)
+    sIdx = ps('Ix','Helvetica',9,CB,   leading=13, spaceAfter=2)
+    sGlo = ps('Gl','Helvetica',8.5,CTX, leading=13, spaceAfter=4)
+    sGlB = ps('GlB','Helvetica-Bold',8.5,CTX, spaceAfter=1)
+    sFt  = ps('Ft','Helvetica',7,CMT,  alignment=TA_CENTER, leading=9)
+
+    def hr(c=CBR, t=0.5, sb=4, sa=4):
+        return HRFlowable(width='100%', thickness=t, color=c, spaceBefore=sb, spaceAfter=sa)
+
+    BASE_TS = [
+        ('BACKGROUND',   (0,0),(-1,0),  CCA),
+        ('ROWBACKGROUNDS',(0,1),(-1,-1),[CWH, CSF]),
+        ('GRID',         (0,0),(-1,-1), 0.4, CBR),
+        ('TOPPADDING',   (0,0),(-1,-1), 4),
+        ('BOTTOMPADDING',(0,0),(-1,-1), 4),
+        ('LEFTPADDING',  (0,0),(-1,-1), 5),
+        ('RIGHTPADDING', (0,0),(-1,-1), 5),
+        ('VALIGN',       (0,0),(-1,-1), 'MIDDLE'),
+    ]
+    def tbl(rows, cw, extra=None):
+        t = Table(rows, colWidths=cw, repeatRows=1)
+        t.setStyle(TableStyle(BASE_TS + (extra or [])))
+        return t
+
+    def img_flow(b64_str, width=CW, max_h=170):
+        if not b64_str:
+            return None
+        try:
+            data = b64lib.b64decode(b64_str)
+            buf  = BytesIO(data)
+            im   = RLImage(buf, width=width)
+            if im.imageHeight and im.imageWidth:
+                ratio = im.imageHeight / im.imageWidth
+                h = width * ratio
+                if h > max_h:
+                    nw = max_h / ratio
+                    im = RLImage(BytesIO(data), width=nw, height=max_h)
+            im.hAlign = 'CENTER'
+            return im
+        except Exception:
+            return None
+
+    def interpretation(text):
+        """Grey italic interpretation box under charts/tables."""
+        return Paragraph(f'📌 {text}', sInt)
+
+    # ── Pull data ─────────────────────────────────────────────────
+    anomalies  = raw_insights.get('anomalies', [])
+    declining  = raw_insights.get('declining_trends', [])
+    improving  = raw_insights.get('improving_trends', [])
+    gaps       = raw_insights.get('benchmarking_gaps', [])
+    corrs      = raw_insights.get('correlations', [])
+    opps       = raw_insights.get('opportunities', [])
+    scorecards = raw_insights.get('scorecards', [])
+    ex         = raw_insights.get('executive_summary', {})
+    hallazgos  = ex.get('hallazgos', [])
+    recs       = ex.get('recomendaciones', [])
+    narrativa  = ex.get('narrativa', '')
+
+    # ── Generate charts ───────────────────────────────────────────
+    ch_anom = chart_anomalies_top(anomalies)
+    ch_dec  = chart_trend_sparklines(declining, 'Tendencias de Deterioro', RED)
+    ch_imp  = chart_trend_sparklines(improving, 'Zonas con Mejora Consistente', GREEN)
+    ch_corr = chart_correlations(corrs)
+    ch_opp  = chart_opportunities(opps)
+    ch_po   = chart_country_metric(scorecards, 'Perfect Orders')
+    ch_lp   = chart_country_metric(scorecards, 'Lead Penetration')
+    ch_gp   = chart_country_metric(scorecards, 'Gross Profit UE')
+    ch_conv = chart_country_metric(scorecards, 'Non-Pro PTC > OP')
+
+    now = datetime.now().strftime('%d/%m/%Y %H:%M')
+
     story = []
-    
-    lines = markdown_content.split('\n')
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            story.append(Spacer(1, 4))
-            continue
-        
-        # Clean markdown bold/italic for PDF
-        line_clean = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
-        line_clean = re.sub(r'\*(.*?)\*', r'<i>\1</i>', line_clean)
-        line_clean = re.sub(r'`(.*?)`', r'\1', line_clean)
-        line_clean = line_clean.replace('&', '&amp;').replace('<b>', '<b>').replace('</b>', '</b>')
-        
-        if line.startswith('# '):
-            text = line[2:].replace('&', '&amp;')
-            story.append(Paragraph(text, style_h1))
-            story.append(HRFlowable(width="100%", thickness=2, color=RAPPI_RED, spaceAfter=8))
-        elif line.startswith('## '):
-            text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line[3:]).replace('&', '&amp;')
-            story.append(Paragraph(text, style_h2))
-            story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor('#DDDDDD'), spaceAfter=4))
-        elif line.startswith('### '):
-            text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line[4:]).replace('&', '&amp;')
-            story.append(Paragraph(text, style_h3))
-        elif line.startswith('- ') or line.startswith('* '):
-            text = '• ' + re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line[2:]).replace('&', '&amp;')
-            story.append(Paragraph(text, style_bullet))
-        elif line.startswith('---'):
-            story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor('#EEEEEE'), spaceAfter=6, spaceBefore=6))
-        elif line.startswith('*') and line.endswith('*') and not line.startswith('**'):
-            text = line.strip('*').replace('&', '&amp;')
-            story.append(Paragraph(text, style_italic))
-        elif line.startswith('|'):
-            continue  # Skip markdown tables (handled separately or left as text)
+
+    # ════════════════════════════════════════════════════════════
+    # COVER PAGE
+    # ════════════════════════════════════════════════════════════
+    story.append(Spacer(1, 12*mm))
+    story.append(Paragraph('Reporte Ejecutivo de Operaciones', sT1))
+    story.append(Paragraph('Rappi Analytics — SP&A Intelligence Suite', sT2))
+    story.append(Paragraph(f'Generado automáticamente · {now} · Powered by Gemini 2.5 Flash', sMt))
+    story.append(hr(CR, 1.5))
+    story.append(Spacer(1, 6))
+
+    # KPI strip
+    kpi_d = [
+        [Paragraph('ANOMALÍAS WoW', ps('kl','Helvetica-Bold',7,CO,alignment=TA_CENTER)),
+         Paragraph('TEND. NEGATIVAS', ps('kl','Helvetica-Bold',7,CO,alignment=TA_CENTER)),
+         Paragraph('TEND. POSITIVAS', ps('kl','Helvetica-Bold',7,CO,alignment=TA_CENTER)),
+         Paragraph('OPORTUNIDADES', ps('kl','Helvetica-Bold',7,CO,alignment=TA_CENTER)),
+         Paragraph('BRECHAS', ps('kl','Helvetica-Bold',7,CO,alignment=TA_CENTER)),
+         Paragraph('PAÍSES', ps('kl','Helvetica-Bold',7,CO,alignment=TA_CENTER))],
+        [Paragraph(str(len(anomalies)), ps('kv','Helvetica-Bold',22,CR,alignment=TA_CENTER)),
+         Paragraph(str(len(declining)), ps('kv','Helvetica-Bold',22,CY,alignment=TA_CENTER)),
+         Paragraph(str(len(improving)), ps('kv','Helvetica-Bold',22,CG,alignment=TA_CENTER)),
+         Paragraph(str(len(opps)),      ps('kv','Helvetica-Bold',22,CO,alignment=TA_CENTER)),
+         Paragraph(str(len(gaps)),      ps('kv','Helvetica-Bold',22,CB,alignment=TA_CENTER)),
+         Paragraph(str(len(scorecards)),ps('kv','Helvetica-Bold',22,CMT,alignment=TA_CENTER))],
+    ]
+    kpi_t = Table(kpi_d, colWidths=[CW/6]*6)
+    kpi_t.setStyle(TableStyle([
+        ('BACKGROUND',(0,0),(-1,-1),CCA),
+        ('GRID',(0,0),(-1,-1),0.5,CBR),
+        ('ALIGN',(0,0),(-1,-1),'CENTER'),
+        ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+        ('TOPPADDING',(0,0),(-1,-1),6),
+        ('BOTTOMPADDING',(0,0),(-1,-1),6),
+        ('LINEABOVE',(0,0),(-1,0),2,CR),
+    ]))
+    story.append(kpi_t)
+    story.append(Spacer(1, 8))
+
+    # ════════════════════════════════════════════════════════════
+    # INDEX
+    # ════════════════════════════════════════════════════════════
+    story.append(Paragraph('Índice del Reporte', sH2))
+    story.append(hr())
+    sections = [
+        ('1.', 'Resumen Ejecutivo — Principales Hallazgos y Recomendaciones'),
+        ('2.', 'Scorecard por País — Métricas Clave de la Semana'),
+        ('3.', 'Anomalías Detectadas — Cambios Drásticos WoW'),
+        ('4.', 'Tendencias Preocupantes — Deterioro Sostenido 3+ Semanas'),
+        ('5.', 'Benchmarking — Brechas entre Zonas Similares'),
+        ('6.', 'Correlaciones entre Métricas Operacionales'),
+        ('7.', 'Oportunidades de Alto Impacto'),
+        ('8.', 'Recomendaciones Accionables para Esta Semana'),
+        ('9.', 'Glosario de Métricas'),
+    ]
+    for num, title in sections:
+        story.append(Paragraph(f'<font color="#E03000"><b>{num}</b></font>  {title}', sIdx))
+    story.append(Spacer(1, 6))
+
+    # ════════════════════════════════════════════════════════════
+    # 1. EXECUTIVE SUMMARY
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('1.  Resumen Ejecutivo', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'Este reporte consolida el análisis automático de todas las zonas operacionales de Rappi '
+        'en los 9 países de operación. Fue generado por IA a partir de los datos de la última semana '
+        'y tiene como objetivo principal identificar alertas, oportunidades y acciones concretas '
+        'para los equipos de SP&A y Operaciones.', sBod))
+    story.append(Spacer(1, 4))
+
+    story.append(Paragraph('Principales Hallazgos de la Semana', sH3))
+    story.append(Paragraph(
+        'Cada hallazgo incluye contexto de negocio para facilitar la comprensión y toma de decisión:', sBod))
+
+    HALLAZGO_CONTEXT = {
+        'Gross Profit UE': 'es el margen bruto por orden — una caída indica que las órdenes están siendo menos rentables (mayor costo operativo, descuentos excesivos o bajo ticket promedio).',
+        'Perfect Orders': 'mide la tasa de órdenes sin problemas (sin cancelaciones, demoras ni defectos) — valores bajos afectan directamente la experiencia del usuario y la retención.',
+        'Lead Penetration': 'indica qué porcentaje de los comercios potenciales ya están activos en Rappi — un valor bajo sugiere oportunidad de expansión de la red de merchants.',
+        'Turbo Adoption': 'mide adopción del servicio de entrega ultra-rápida — clave para diferenciación y mayor ticket promedio.',
+        'MLTV Top Verticals': 'mide si los usuarios compran en múltiples verticales (restaurantes, supermercados, farmacias) — usuarios multi-vertical tienen mayor lifetime value.',
+        'Non-Pro PTC > OP': 'es la tasa de conversión de usuarios no-Pro desde "ir a pagar" hasta "orden confirmada" — caídas indican fricción en el checkout.',
+    }
+    for h in hallazgos[:6]:
+        clean = re.sub(r'<[^>]+>', '', str(h))
+        # Find relevant context
+        ctx = ''
+        for key, explanation in HALLAZGO_CONTEXT.items():
+            if key.lower() in clean.lower():
+                ctx = f' ({explanation})'
+                break
+        story.append(Paragraph(f'▸  {clean}{ctx}', sBul))
+    story.append(Spacer(1, 6))
+
+    if narrativa:
+        story.append(Paragraph('Análisis General', sH3))
+        for para in narrativa.split('\n'):
+            p = re.sub(r'<[^>]+>', '', para.strip())
+            if p:
+                story.append(Paragraph(p, sBod))
+    story.append(Spacer(1, 8))
+
+    # ════════════════════════════════════════════════════════════
+    # 2. COUNTRY SCORECARDS
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('2.  Scorecard por País — Métricas Clave de la Semana', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'Resumen de métricas principales por país. Los valores son la mediana de todas las zonas de ese país. '
+        '"WoW" (Week over Week) indica si la métrica mejoró o empeoró respecto a la semana anterior. '
+        'Un ↑ verde es mejora, un ↓ rojo es deterioro. Los países están ordenados por volumen total de órdenes.', sBod))
+    story.append(Spacer(1, 5))
+
+    if scorecards:
+        sc_metrics = ['Perfect Orders', 'Lead Penetration', 'Gross Profit UE', 'Non-Pro PTC > OP', 'Turbo Adoption']
+        sc_hdr = [Paragraph('País', sTH), Paragraph('Órdenes\n(sem.)', sTH)]
+        for m in sc_metrics:
+            sc_hdr.append(Paragraph(m[:16], sTH))
+        sc_rows = [sc_hdr]
+        for sc in scorecards:
+            row = [
+                Paragraph(f"{sc['country']}", ps('cc','Helvetica-Bold',8,CTX)),
+                Paragraph(f"{sc['total_orders']:,}", sCtr),
+            ]
+            for m in sc_metrics:
+                md = sc['metrics'].get(m)
+                if md:
+                    wow = md.get('wow')
+                    arrow = '↑' if wow and wow > 0 else ('↓' if wow and wow < 0 else '→')
+                    col = CG if wow and wow > 0 else (CR if wow and wow < 0 else CMT)
+                    row.append(Paragraph(
+                        f"{md['fmt']}\n<font color='{'#16A34A' if wow and wow > 0 else '#E03000' if wow and wow < 0 else '#6B7280'}'>{arrow} {md.get('wow_fmt','—')}</font>",
+                        ps('sv','Helvetica',7.5,CTX, alignment=TA_CENTER, leading=10)
+                    ))
+                else:
+                    row.append(Paragraph('—', sCtr))
+            sc_rows.append(row)
+
+        sc_cw = [CW*0.13, CW*0.10] + [CW*0.154]*5
+        story.append(tbl(sc_rows, sc_cw))
+        story.append(Spacer(1, 6))
+        story.append(interpretation(
+            'Leé esta tabla comparando países del mismo nivel: Uruguay y Perú generalmente lideran en Perfect Orders, '
+            'lo que indica buenas prácticas operacionales replicables. Los países con WoW negativo consecutivo '
+            'en varias métricas requieren revisión de sus playbooks locales.'
+        ))
+
+    # Country charts side by side
+    story.append(Spacer(1, 8))
+    pairs = [(ch_po, 'Perfect Orders'), (ch_lp, 'Lead Penetration'),
+             (ch_gp, 'Gross Profit UE'), (ch_conv, 'Conversión No-Pro')]
+    for i in range(0, len(pairs), 2):
+        left_img, left_title = pairs[i]
+        il = img_flow(left_img, width=CW*0.47, max_h=150)
+        if i+1 < len(pairs):
+            right_img, right_title = pairs[i+1]
+            ir = img_flow(right_img, width=CW*0.47, max_h=150)
+            row = [[il or Paragraph('—', sCtr), ir or Paragraph('—', sCtr)]]
+            pair_t = Table(row, colWidths=[CW*0.49, CW*0.49])
+            pair_t.setStyle(TableStyle([
+                ('VALIGN',(0,0),(-1,-1),'TOP'),
+                ('LEFTPADDING',(0,0),(-1,-1),2),
+                ('RIGHTPADDING',(0,0),(-1,-1),2),
+            ]))
+            story.append(pair_t)
         else:
-            text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line).replace('&', '&amp;')
-            if text:
-                story.append(Paragraph(text, style_body))
-    
-    doc.build(story)
+            if il: story.append(il)
+        story.append(Spacer(1, 4))
+
+    # ════════════════════════════════════════════════════════════
+    # 3. ANOMALIES
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('3.  Anomalías Detectadas — Cambios Drásticos WoW', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'Una anomalía es un cambio abrupto (>10%) de una semana a la siguiente. '
+        'Puede ser positiva (mejora inesperada, posiblemente por un evento o campaña) o negativa '
+        '(deterioro abrupto que requiere investigación urgente). No confundas con tendencias: '
+        'una anomalía es un salto puntual, no un deterioro gradual.', sBod))
+    story.append(Spacer(1, 5))
+
+    ch_anom_img = img_flow(ch_anom, CW, 160)
+    if ch_anom_img:
+        story.append(ch_anom_img)
+        story.append(Spacer(1, 4))
+        story.append(interpretation(
+            'Las barras más largas representan los cambios más drásticos. '
+            'Priorizá investigar primero las zonas con alto volumen de órdenes (ver sección 7). '
+            'Un deterioro de Gross Profit UE puede explicarse por cambios en política de descuentos o '
+            'aumento de costos logísticos en esa zona.'
+        ))
+
+    story.append(Spacer(1, 6))
+    if anomalies:
+        det = [a for a in anomalies if a['direction'] == 'deterioro'][:10]
+        mej = [a for a in anomalies if a['direction'] == 'mejora'][:5]
+
+        story.append(Paragraph('Deterioros más significativos', sH3))
+        rows = [[Paragraph('Zona', sTH), Paragraph('País', sTH), Paragraph('Métrica', sTH),
+                 Paragraph('Cambio WoW', sTH), Paragraph('Semana ant. → Actual', sTH)]]
+        for a in det:
+            rows.append([
+                Paragraph(a['zone'][:32], sTD),
+                Paragraph(a['country'], sTDm),
+                Paragraph(a['metric'][:28], sTDm),
+                Paragraph(a['change_display'], ps('cd','Helvetica-Bold',9,CR, alignment=TA_CENTER)),
+                Paragraph(f"{format_metric_value(a['metric'], a['previous'])}  →  "
+                          f"{format_metric_value(a['metric'], a['current'])}", sTDm),
+            ])
+        story.append(tbl(rows, [CW*0.27, CW*0.12, CW*0.24, CW*0.14, CW*0.23]))
+
+        if mej:
+            story.append(Spacer(1, 8))
+            story.append(Paragraph('Mejoras inesperadas — investigar causa para replicar', sH3g))
+            rows2 = [[Paragraph('Zona', sTH), Paragraph('País', sTH), Paragraph('Métrica', sTH),
+                      Paragraph('Cambio WoW', sTH)]]
+            for a in mej:
+                rows2.append([
+                    Paragraph(a['zone'][:32], sTD),
+                    Paragraph(a['country'], sTDm),
+                    Paragraph(a['metric'][:28], sTDm),
+                    Paragraph(a['change_display'], ps('cd','Helvetica-Bold',9,CG, alignment=TA_CENTER)),
+                ])
+            story.append(tbl(rows2, [CW*0.35, CW*0.15, CW*0.32, CW*0.18]))
+
+    # ════════════════════════════════════════════════════════════
+    # 4. TRENDS
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('4.  Tendencias Preocupantes — Deterioro Sostenido 3+ Semanas', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'A diferencia de una anomalía (salto brusco), una tendencia es un deterioro gradual y '
+        'consistente durante 3 o más semanas consecutivas. Esto es más preocupante porque sugiere '
+        'un problema estructural, no un evento puntual. Estas zonas necesitan intervención activa, '
+        'no solo monitoreo.', sBod))
+    story.append(Spacer(1, 5))
+
+    if ch_dec:
+        ch_dec_img = img_flow(ch_dec, CW, 200)
+        if ch_dec_img:
+            story.append(ch_dec_img)
+            story.append(Spacer(1, 4))
+            story.append(interpretation(
+                'Cada mini-gráfico muestra la evolución de las últimas 4 semanas de una zona específica. '
+                'Una línea con pendiente negativa consistente es la señal de alerta. '
+                'Compará el valor actual vs el de hace 4 semanas para dimensionar el impacto acumulado.'
+            ))
+
+    if declining:
+        story.append(Spacer(1, 6))
+        rows = [[Paragraph('Zona', sTH), Paragraph('País', sTH), Paragraph('Métrica', sTH),
+                 Paragraph('Cambio total (4 sem.)', sTH), Paragraph('Interpretación', sTH)]]
+        for t in declining[:10]:
+            pct = t['total_change_pct'] * 100
+            interp = ('Deterioro leve' if abs(pct) < 20 else
+                      'Deterioro moderado — requiere plan de acción' if abs(pct) < 50 else
+                      'Deterioro severo — intervención urgente')
+            rows.append([
+                Paragraph(t['zone'][:30], sTD),
+                Paragraph(t['country'], sTDm),
+                Paragraph(t['metric'][:26], sTDm),
+                Paragraph(f"{pct:+.1f}%", ps('tc','Helvetica-Bold',9,CR,alignment=TA_CENTER)),
+                Paragraph(interp, sTDm),
+            ])
+        story.append(tbl(rows, [CW*0.26, CW*0.11, CW*0.24, CW*0.15, CW*0.24]))
+
+    if improving:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph('Zonas con Mejora Consistente — Casos a Replicar', sH3g))
+        story.append(Paragraph(
+            'Estas zonas mejoraron durante 3+ semanas seguidas. Investigá qué cambió '
+            '(nuevo equipo, campaña local, ajuste operacional) para replicar la práctica.', sBod))
+        if ch_imp:
+            ch_imp_img = img_flow(ch_imp, CW, 180)
+            if ch_imp_img:
+                story.append(ch_imp_img)
+
+    # ════════════════════════════════════════════════════════════
+    # 5. BENCHMARKING
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('5.  Benchmarking — Brechas entre Zonas Similares', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'El benchmarking compara zonas del mismo país y mismo tipo (Wealthy / Non Wealthy). '
+        'Si dos zonas tienen el mismo contexto socioeconómico y geográfico pero resultados muy '
+        'distintos, la zona débil tiene una oportunidad de mejora concreta: puede alcanzar el '
+        'nivel de la zona top adoptando sus prácticas. Una brecha grande es una oportunidad, no solo un problema.', sBod))
+    story.append(Spacer(1, 5))
+
+    if gaps:
+        rows = [[Paragraph('País', sTH), Paragraph('Tipo de Zona', sTH),
+                 Paragraph('Métrica', sTH), Paragraph('Zona Referente (Top)', sTH),
+                 Paragraph('Zona con Oportunidad', sTH), Paragraph('N° Zonas', sTH)]]
+        for g in gaps[:10]:
+            top_z = g['top_zones'][0] if g['top_zones'] else {}
+            bot_z = g['bot_zones'][0]  if g['bot_zones']  else {}
+            top_fmt = format_metric_value(g['metric'], top_z.get('L0W_ROLL', 0))
+            bot_fmt = format_metric_value(g['metric'], bot_z.get('L0W_ROLL', 0))
+            rows.append([
+                Paragraph(g['country'], sTD),
+                Paragraph(g['zone_type'], sTDm),
+                Paragraph(g['metric'][:24], sTDm),
+                Paragraph(f"{top_fmt}\n{top_z.get('ZONE','')[:26]}",
+                          ps('gt','Helvetica',7.5,CG, leading=10)),
+                Paragraph(f"{bot_fmt}\n{bot_z.get('ZONE','')[:26]}",
+                          ps('gr','Helvetica',7.5,CR, leading=10)),
+                Paragraph(str(g['zones_count']), sCtr),
+            ])
+        story.append(tbl(rows, [CW*0.12, CW*0.13, CW*0.19, CW*0.23, CW*0.23, CW*0.10]))
+        story.append(Spacer(1, 5))
+        story.append(interpretation(
+            'La columna "Zona Referente" muestra el benchmark ideal dentro del mismo mercado. '
+            'La columna "Zona con Oportunidad" es donde se puede aplicar una intervención concreta. '
+            'Priorizá las brechas en métricas de alta visibilidad para el usuario como Perfect Orders.'
+        ))
+
+    # ════════════════════════════════════════════════════════════
+    # 6. CORRELATIONS
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('6.  Correlaciones entre Métricas Operacionales', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'Una correlación mide qué tan relacionadas están dos métricas entre sí, en todas las zonas. '
+        'Un valor cercano a +1 significa que cuando una sube, la otra también sube. '
+        'Cercano a -1 significa que van en sentido opuesto. '
+        'Esto es útil para priorizar intervenciones: si dos métricas tienen correlación fuerte, '
+        'mejorar una puede arrastrar a la otra sin costo adicional.', sBod))
+    story.append(Spacer(1, 5))
+
+    if ch_corr:
+        ch_corr_img = img_flow(ch_corr, CW, 170)
+        if ch_corr_img:
+            story.append(ch_corr_img)
+            story.append(Spacer(1, 4))
+
+    if corrs:
+        rows = [[Paragraph('Métrica A', sTH), Paragraph('Métrica B', sTH),
+                 Paragraph('r', sTH), Paragraph('Intensidad', sTH),
+                 Paragraph('Qué significa en la práctica', sTH)]]
+        CORR_MEANING = {
+            ('MLTV Top Verticals Adoption','Turbo Adoption'):
+                'Usuarios multi-vertical también usan Turbo: activar Turbo impulsa retención global.',
+            ('Non-Pro PTC > OP','Restaurants SS > ATC CVR'):
+                'El checkout y la conversión en restaurantes están vinculados: mejorar UX en uno mejora el otro.',
+            ('MLTV Top Verticals Adoption','Pro Adoption'):
+                'Los usuarios Pro adoptan más verticales: la suscripción impulsa el uso cruzado.',
+        }
+        for c in corrs[:8]:
+            key = (c['metric_a'], c['metric_b'])
+            meaning = CORR_MEANING.get(key, CORR_MEANING.get((c['metric_b'], c['metric_a']),
+                      'Relación estadística significativa — explorar causa-efecto con el equipo local.'))
+            col = CG if c['correlation'] > 0 else CR
+            rows.append([
+                Paragraph(c['metric_a'][:26], sTDm),
+                Paragraph(c['metric_b'][:26], sTDm),
+                Paragraph(f"r={c['correlation']:.2f}",
+                          ps('rv','Helvetica-Bold',9,col, alignment=TA_CENTER)),
+                Paragraph(c['strength'], sCtr),
+                Paragraph(meaning, sTDm),
+            ])
+        story.append(Spacer(1, 5))
+        story.append(tbl(rows, [CW*0.20, CW*0.20, CW*0.10, CW*0.12, CW*0.38]))
+
+    # ════════════════════════════════════════════════════════════
+    # 7. OPPORTUNITIES
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('7.  Oportunidades de Alto Impacto', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'Estas zonas tienen alto volumen de órdenes semanales pero una o más métricas por debajo '
+        'del benchmark del mercado. Son las oportunidades de mayor impacto potencial: '
+        'el volumen ya está, solo hay que mejorar la eficiencia. '
+        'Priorizá estas zonas antes de buscar crecimiento en nuevas áreas.', sBod))
+    story.append(Spacer(1, 5))
+
+    if ch_opp:
+        ch_opp_img = img_flow(ch_opp, CW, 160)
+        if ch_opp_img:
+            story.append(ch_opp_img)
+            story.append(Spacer(1, 4))
+            story.append(interpretation(
+                'El gráfico muestra el volumen de órdenes de cada zona. '
+                'A mayor barra, mayor impacto potencial de la mejora. '
+                'La tabla debajo detalla exactamente cuánto está por debajo del benchmark cada zona.'
+            ))
+
+    if opps:
+        story.append(Spacer(1, 6))
+        rows = [[Paragraph('Zona', sTH), Paragraph('País / Tipo', sTH),
+                 Paragraph('Métrica con Gap', sTH), Paragraph('Valor actual', sTH),
+                 Paragraph('Benchmark (mediana)', sTH), Paragraph('Órdenes/sem', sTH)]]
+        for o in opps:
+            rows.append([
+                Paragraph(o['zone'][:28], sTD),
+                Paragraph(f"{o['country']}\n{o.get('zone_type','')}", sTDm),
+                Paragraph(o['metric'][:24], sTDm),
+                Paragraph(o['metric_value_fmt'], ps('ov','Helvetica-Bold',9,CR, alignment=TA_CENTER)),
+                Paragraph(o['benchmark_fmt'], ps('bv','Helvetica-Bold',9,CG, alignment=TA_CENTER)),
+                Paragraph(f"{o['orders']:,}", sCtr),
+            ])
+        story.append(tbl(rows, [CW*0.24, CW*0.15, CW*0.21, CW*0.13, CW*0.16, CW*0.11]))
+
+    # ════════════════════════════════════════════════════════════
+    # 8. RECOMMENDATIONS
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('8.  Recomendaciones Accionables para Esta Semana', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'Acciones concretas, priorizadas por potencial de impacto. '
+        'Cada recomendación deriva directamente de los hallazgos de este reporte.', sBod))
+    story.append(Spacer(1, 6))
+
+    if recs:
+        for i, rec in enumerate(recs, 1):
+            clean = re.sub(r'<[^>]+>', '', str(rec))
+            rec_data = [[
+                Paragraph(str(i), ps('rn','Helvetica-Bold',14,CR, alignment=TA_CENTER)),
+                Paragraph(f'→  {clean}', ps('rb','Helvetica',9,CTX, leading=14))
+            ]]
+            rt = Table(rec_data, colWidths=[10*mm, CW - 10*mm])
+            rt.setStyle(TableStyle([
+                ('BACKGROUND',(0,0),(-1,-1),CSF),
+                ('LINEBELOW',(0,0),(-1,-1),0.4,CBR),
+                ('LINEAFTER',(0,0),(0,-1),2.5,CR),
+                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+                ('TOPPADDING',(0,0),(-1,-1),8),
+                ('BOTTOMPADDING',(0,0),(-1,-1),8),
+                ('LEFTPADDING',(0,0),(-1,-1),8),
+                ('RIGHTPADDING',(0,0),(-1,-1),8),
+            ]))
+            story.append(rt)
+            story.append(Spacer(1, 3))
+
+    # ════════════════════════════════════════════════════════════
+    # 9. GLOSSARY
+    # ════════════════════════════════════════════════════════════
+    story.append(PageBreak())
+    story.append(Paragraph('9.  Glosario de Métricas', sH2))
+    story.append(hr(CR, 0.8))
+    story.append(Paragraph(
+        'Referencia rápida de todas las métricas usadas en este reporte, '
+        'con su definición y cómo interpretarlas en contexto operacional.', sBod))
+    story.append(Spacer(1, 6))
+
+    GLOSARIO = [
+        ('Perfect Orders',
+         'Órdenes sin cancelaciones, demoras ni defectos / Total de órdenes.',
+         'Métrica de calidad de servicio. Un valor bajo (<85%) indica problemas operacionales que afectan la experiencia del usuario y aumentan los costos de soporte. Meta ideal: >90%.'),
+        ('Lead Penetration',
+         'Tiendas habilitadas en Rappi / (Tiendas habilitadas + prospectos identificados + tiendas que salieron).',
+         'Mide el avance en la captación de merchants. Valores bajos (<15%) indican oportunidad de expansión de la red. No confundir con market share total.'),
+        ('Gross Profit UE',
+         'Margen bruto de ganancia / Total de órdenes (valor absoluto en moneda local).',
+         'Rentabilidad por orden. Puede ser negativo si los subsidios o costos superan los ingresos. Valores negativos o cerca de cero requieren revisión de pricing y costos logísticos.'),
+        ('Non-Pro PTC > OP',
+         'Usuarios No-Pro que completaron una orden / Usuarios No-Pro que iniciaron el checkout.',
+         'Tasa de conversión final del funnel de compra para usuarios sin suscripción Pro. Caídas indican fricción en el pago, bugs en la app o problemas con métodos de pago.'),
+        ('% PRO Users Who Breakeven',
+         'Usuarios Pro cuyo valor generado cubre el costo de su membresía / Total usuarios Pro.',
+         'Mide la rentabilidad de la base Pro. Un valor bajo significa que Rappi está subsidiando membresías que no se usan suficientemente. Meta: maximizar esta tasa.'),
+        ('MLTV Top Verticals Adoption',
+         'Usuarios con órdenes en múltiples verticales (restaurantes, super, pharma, liquors) / Total usuarios.',
+         'Indicador de retención y lifetime value. Usuarios multi-vertical tienen mayor frecuencia de compra y menor churn. Correlaciona fuerte con Pro Adoption.'),
+        ('Pro Adoption',
+         'Usuarios activos con suscripción Pro / Total usuarios de Rappi.',
+         'Penetración del producto de suscripción. La suscripción Pro aumenta la frecuencia de compra y reduce el costo de adquisición a largo plazo.'),
+        ('Restaurants Markdowns / GMV',
+         'Descuentos totales en órdenes de restaurantes / Gross Merchandise Value de restaurantes.',
+         'Mide el nivel de subsidio vía descuentos. Un ratio alto puede estar afectando el Gross Profit. Ideal: mantenerlo lo más bajo posible sin afectar la conversión.'),
+        ('Restaurants SS > ATC CVR',
+         'Sesiones que agregaron algo al carrito después de entrar a una tienda de restaurantes.',
+         'Indica la relevancia del assortment de la tienda. Baja conversión sugiere que los precios, fotos o menú no son atractivos.'),
+        ('Restaurants SST > SS CVR',
+         '% de usuarios que seleccionan una tienda de la lista de restaurantes.',
+         'Mide si el listing de restaurantes es atractivo. Baja conversión puede indicar pocas opciones, precios altos o malas fotos de portada.'),
+        ('Retail SST > SS CVR',
+         '% de usuarios que seleccionan una tienda de la lista de supermercados/retail.',
+         'Mismo concepto que Restaurants SST>SS CVR pero para el vertical de supermercados. Baja conversión puede indicar problemas de assortment o cobertura geográfica.'),
+        ('Turbo Adoption',
+         'Usuarios que compran en Turbo / Usuarios con tiendas Turbo disponibles en su zona.',
+         'Mide la penetración del servicio de entrega ultra-rápida entre quienes lo tienen disponible. Aumentar esta métrica puede incrementar el ticket promedio y diferenciación competitiva.'),
+        ('WoW (Week over Week)',
+         'Variación de una métrica respecto a la semana anterior.',
+         'Ejemplo: un WoW de -5% en Perfect Orders significa que esta semana hubo 5 puntos porcentuales menos de órdenes perfectas que la semana pasada.'),
+        ('Zona Wealthy / Non Wealthy',
+         'Segmentación de zonas por nivel socioeconómico predominante.',
+         'Permite comparar zonas con contextos similares. No mezclar en benchmarking: una zona Non Wealthy no debe compararse con una Wealthy para KPIs de ticket o conversión.'),
+    ]
+
+    for name, definition, interpretation_text in GLOSARIO:
+        story.append(KeepTogether([
+            Paragraph(name, sGlB),
+            Paragraph(f'<b>Definición:</b> {definition}', sGlo),
+            Paragraph(f'<b>Cómo interpretarlo:</b> {interpretation_text}', sGlo),
+            Spacer(1, 3),
+            hr(CBR, 0.3, 0, 4),
+        ]))
+
+    # ════════════════════════════════════════════════════════════
+    # PAGE HEADER / FOOTER
+    # ════════════════════════════════════════════════════════════
+    def on_page(canvas, doc):
+        canvas.saveState()
+        # Top bar
+        canvas.setFillColor(HexColor('#F8F9FA'))
+        canvas.rect(0, H-20, W, 20, fill=1, stroke=0)
+        canvas.setFillColor(CR)
+        canvas.rect(0, H-21, W, 1.5, fill=1, stroke=0)
+        canvas.setFont('Helvetica-Bold', 8)
+        canvas.setFillColor(HexColor('#E03000'))
+        canvas.drawString(LM, H-14, 'Rappi Analytics — Reporte Ejecutivo de Operaciones')
+        canvas.setFont('Helvetica', 7.5)
+        canvas.setFillColor(HexColor('#6B7280'))
+        canvas.drawRightString(W-RM, H-14, now)
+        # Bottom bar
+        canvas.setFillColor(HexColor('#F8F9FA'))
+        canvas.rect(0, 0, W, 14, fill=1, stroke=0)
+        canvas.setFont('Helvetica', 7)
+        canvas.setFillColor(HexColor('#9CA3AF'))
+        canvas.drawString(LM, 4, 'Datos indicativos — validar con equipos locales antes de tomar decisiones.')
+        canvas.drawRightString(W-RM, 4, f'Página {doc.page}')
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        output_path, pagesize=A4,
+        leftMargin=LM, rightMargin=RM,
+        topMargin=20*mm, bottomMargin=14*mm,
+        title='Reporte Ejecutivo Rappi',
+        author='Rappi Analytics SP&A',
+    )
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     return output_path
+
