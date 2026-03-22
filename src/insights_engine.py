@@ -24,15 +24,42 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 GEMINI_URL = os.environ.get('GEMINI_URL',
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent")
 
-BG_DARK  = '#FFFFFF'   # chart background → white
-BG_MID   = '#F8F9FA'   # subplot background → very light grey
-GRID_COL = '#E5E7EB'   # grid lines → light grey
-TEXT_COL = '#1F2937'   # text → near-black
-RED      = '#E03000'   # Rappi red (slightly darkened for white bg)
-ORANGE   = '#FF6B35'   # Rappi orange
-GREEN    = '#16A34A'   # green
-YELLOW   = '#D97706'   # amber
-BLUE     = '#2563EB'   # blue
+BG_DARK  = '#FFFFFF'   # PDF chart background → white
+BG_MID   = '#F8F9FA'   # PDF subplot background
+GRID_COL = '#E5E7EB'   # PDF grid lines
+TEXT_COL = '#1F2937'   # PDF text
+RED      = '#E03000'
+ORANGE   = '#FF6B35'
+GREEN    = '#16A34A'
+YELLOW   = '#D97706'
+BLUE     = '#2563EB'
+
+# Dark mode palette (for web display)
+D_BG    = '#0F0F1A'
+D_MID   = '#1C1C2E'
+D_GRID  = '#2A2A3E'
+D_TEXT  = '#E8E8F0'
+D_RED   = '#FF441F'
+D_ORANGE= '#FF6B35'
+D_GREEN = '#22C55E'
+D_YELLOW= '#F59E0B'
+
+
+def _colors(dark=False):
+    """Return (bg, mid, grid, text, red, orange, green, yellow) for dark or light mode."""
+    if dark:
+        return D_BG, D_MID, D_GRID, D_TEXT, D_RED, D_ORANGE, D_GREEN, D_YELLOW
+    return BG_DARK, BG_MID, GRID_COL, TEXT_COL, RED, ORANGE, GREEN, YELLOW
+
+
+def _fig_to_b64(fig, dark=False):
+    bg = D_BG if dark else BG_DARK
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                facecolor=bg, edgecolor='none')
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode()
 
 ALL_KEY_METRICS = [
     'Perfect Orders', 'Lead Penetration', 'Gross Profit UE',
@@ -258,6 +285,7 @@ def compile_raw_insights():
         'correlations': detect_correlations(metrics_df),
         'opportunities': detect_opportunities(metrics_df, orders_df),
         'scorecards': country_scorecards(metrics_df, orders_df),
+        '_metrics_df': metrics_df,  # kept for chart generation, not serialized
     }
 
 
@@ -265,156 +293,228 @@ def compile_raw_insights():
 # CHART GENERATORS
 # ──────────────────────────────────────────────────────────────
 
-def _fig_to_b64(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                facecolor=BG_DARK, edgecolor='none')   # BG_DARK is now white
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode()
-
-
-def chart_anomalies_top(anomalies):
+def chart_anomalies_top(anomalies, dark=False):
     top = [a for a in anomalies if a['direction'] == 'deterioro'][:8]
     if not top:
         return None
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
     labels = [f"{a['zone'][:28]} ({a['country'][:3]})" for a in top]
     vals   = [min(abs(a['change_pct']) * 100, 300) for a in top]
     fig, ax = plt.subplots(figsize=(8, max(3.5, len(top) * 0.52)))
-    fig.patch.set_facecolor(BG_DARK); ax.set_facecolor(BG_DARK)
-    bars = ax.barh(range(len(labels)), vals, color=RED, alpha=0.82, height=0.55)
-    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, color=TEXT_COL, fontsize=8)
-    ax.set_xlabel('Magnitud del cambio WoW', color=TEXT_COL, fontsize=8)
-    ax.set_title('Top Deterioros — Semana vs Semana Anterior', color=TEXT_COL, fontsize=10, fontweight='bold', pad=8)
+    fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
+    bars = ax.barh(range(len(labels)), vals, color=red, alpha=0.82, height=0.55)
+    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, color=text, fontsize=8)
+    ax.set_xlabel('Magnitud del cambio WoW', color=text, fontsize=8)
+    ax.set_title('Top Deterioros — Semana vs Semana Anterior', color=text, fontsize=10, fontweight='bold', pad=8)
     max_v = max(vals) if vals else 1
-    ax.set_xlim(0, max_v * 1.30)   # extra right margin for labels
+    ax.set_xlim(0, max_v * 1.30)
     for bar, a in zip(bars, top):
         ax.text(bar.get_width() + max_v * 0.015, bar.get_y() + bar.get_height() / 2,
-                a['change_display'], va='center', color=RED, fontsize=8, fontweight='bold')
+                a['change_display'], va='center', color=red, fontsize=8, fontweight='bold')
     ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
-    ax.tick_params(colors=TEXT_COL); ax.xaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.5)
+    ax.spines['bottom'].set_color(grid); ax.spines['left'].set_color(grid)
+    ax.tick_params(colors=text); ax.xaxis.grid(True, color=grid, linestyle='--', alpha=0.5)
     ax.set_axisbelow(True); plt.tight_layout()
-    return _fig_to_b64(fig)
+    return _fig_to_b64(fig, dark)
 
 
-def chart_country_metric(scorecards, metric_name):
+def chart_country_metric(scorecards, metric_name, dark=False):
     items = [(s['country'], s['metrics'][metric_name]) for s in scorecards if metric_name in s['metrics']]
     if not items:
         return None
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
     countries = [i[0][:12] for i in items]
     values    = [i[1]['value'] for i in items]
     fmts      = [i[1]['fmt'] for i in items]
     plot_vals = [v * 100 if (0 < abs(v) <= 1.5 and '%' in format_metric_value(metric_name, v)) else v for v in values]
     fig, ax = plt.subplots(figsize=(7, 3.2))
-    fig.patch.set_facecolor(BG_DARK); ax.set_facecolor(BG_DARK)
-    colors = [RED if i % 2 == 0 else ORANGE for i in range(len(countries))]
+    fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
+    colors = [red if i % 2 == 0 else orange for i in range(len(countries))]
     x = np.arange(len(countries))
     bars = ax.bar(x, plot_vals, color=colors, alpha=0.88, width=0.55)
-    ax.set_xticks(x); ax.set_xticklabels(countries, color=TEXT_COL, fontsize=8, rotation=30, ha='right')
-    ax.set_title(f'{metric_name} — Mediana por País', color=TEXT_COL, fontsize=9, fontweight='bold', pad=6)
+    ax.set_xticks(x); ax.set_xticklabels(countries, color=text, fontsize=8, rotation=30, ha='right')
+    ax.set_title(f'{metric_name} — Mediana por País', color=text, fontsize=9, fontweight='bold', pad=6)
     max_v = max(abs(v) for v in plot_vals) if plot_vals else 1
-    ax.set_ylim(0, max_v * 1.25)
+    ax.set_ylim(min(min(plot_vals)*1.2, 0) if min(plot_vals) < 0 else 0, max_v * 1.25)
     for bar, fmt in zip(bars, fmts):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max_v * 0.03,
-                fmt, ha='center', color=TEXT_COL, fontsize=7, fontweight='bold')
+        ypos = bar.get_height() + max_v * 0.03 if bar.get_height() >= 0 else bar.get_height() - max_v * 0.08
+        ax.text(bar.get_x() + bar.get_width() / 2, ypos, fmt,
+                ha='center', color=text, fontsize=7, fontweight='bold')
     ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
-    ax.tick_params(colors=TEXT_COL); ax.yaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.4)
+    ax.spines['bottom'].set_color(grid); ax.spines['left'].set_color(grid)
+    ax.tick_params(colors=text); ax.yaxis.grid(True, color=grid, linestyle='--', alpha=0.4)
     ax.set_axisbelow(True); plt.tight_layout()
-    return _fig_to_b64(fig)
+    return _fig_to_b64(fig, dark)
 
 
-def chart_trend_sparklines(trends, title, color):
-    items = trends[:6]
+def chart_trend_sparklines(trends, title, line_color_name='red', dark=False):
+    items = trends[:4]
     if not items:
         return None
-    n = len(items); cols = min(n, 3); rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.5, rows * 2.8))
-    fig.patch.set_facecolor(BG_DARK)
-    axes_flat = np.array(axes).flatten() if hasattr(axes, 'flatten') else [axes]
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
+    color_map = {'red': red, 'green': green, 'orange': orange}
+    color = color_map.get(line_color_name, red)
+    n = len(items)
+    cols = min(n, 2); rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.2, rows * 3.0))
+    fig.patch.set_facecolor(bg)
+    if n == 1:
+        axes_flat = [axes]
+    else:
+        axes_flat = list(np.array(axes).flatten())
     for i, (ax, entry) in enumerate(zip(axes_flat, items)):
-        ax.set_facecolor(BG_MID)
+        ax.set_facecolor(mid)
         vals = entry['values']
         x = np.arange(len(vals))
         ax.plot(x, vals, color=color, linewidth=2, marker='o', markersize=4,
                 markerfacecolor='white', markeredgecolor=color, markeredgewidth=1.5)
         ax.fill_between(x, vals, alpha=0.12, color=color)
         ax.set_xticks(x)
-        ax.set_xticklabels(entry['labels'], fontsize=6, color=TEXT_COL, rotation=25, ha='right')
-        zone_label = entry['zone'][:22]
-        metric_label = entry['metric'][:24]
+        ax.set_xticklabels(entry['labels'], fontsize=6.5, color=text, rotation=20, ha='right')
+        zone_label = entry['zone'][:20]
+        metric_label = entry['metric'][:22]
         ax.set_title(f"{zone_label}\n{entry['country']} · {metric_label}",
-                     fontsize=7, color=TEXT_COL, fontweight='bold', pad=3)
-        ax.tick_params(colors=TEXT_COL, labelsize=6.5)
+                     fontsize=7.5, color=text, fontweight='bold', pad=3)
+        ax.tick_params(colors=text, labelsize=6.5)
         ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-        ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
-        ax.yaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.3)
+        ax.spines['bottom'].set_color(grid); ax.spines['left'].set_color(grid)
+        ax.yaxis.grid(True, color=grid, linestyle='--', alpha=0.3)
     for ax in axes_flat[n:]:
         ax.set_visible(False)
-    fig.suptitle(title, color=TEXT_COL, fontsize=11, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    return _fig_to_b64(fig)
+    fig.suptitle(title, color=text, fontsize=10, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    return _fig_to_b64(fig, dark)
 
 
-def chart_correlations(correlations):
+def chart_correlations(correlations, dark=False):
     top = correlations[:7]
     if not top:
         return None
-    # Short readable labels
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
     labels = [f"{c['metric_a'][:18]}\nvs {c['metric_b'][:18]}" for c in top]
     vals   = [c['correlation'] for c in top]
-    colors = [GREEN if v > 0 else RED for v in vals]
+    colors = [green if v > 0 else red for v in vals]
     fig, ax = plt.subplots(figsize=(8, 3.8))
-    fig.patch.set_facecolor(BG_DARK); ax.set_facecolor(BG_DARK)
+    fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
     x = np.arange(len(labels))
     bars = ax.bar(x, vals, color=colors, alpha=0.85, width=0.55)
-    ax.axhline(0, color=GRID_COL, linewidth=0.8)
+    ax.axhline(0, color=grid, linewidth=0.8)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, color=TEXT_COL, fontsize=7, rotation=0, ha='center')
-    ax.set_ylabel('Coef. de correlación (r)', color=TEXT_COL, fontsize=8)
+    ax.set_xticklabels(labels, color=text, fontsize=7, rotation=0, ha='center')
+    ax.set_ylabel('Coef. de correlación (r)', color=text, fontsize=8)
     ax.set_ylim(-1.15, 1.15)
-    ax.set_title('Correlaciones entre Métricas Operacionales', color=TEXT_COL, fontsize=10, fontweight='bold', pad=8)
+    ax.set_title('Correlaciones entre Métricas Operacionales', color=text, fontsize=10, fontweight='bold', pad=8)
     for bar, c in zip(bars, top):
         yoff = 0.05 if bar.get_height() >= 0 else -0.10
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + yoff,
-                f"r={c['correlation']:.2f}", ha='center', color=TEXT_COL, fontsize=8, fontweight='bold')
+                f"r={c['correlation']:.2f}", ha='center', color=text, fontsize=8, fontweight='bold')
     ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
-    ax.tick_params(colors=TEXT_COL); ax.yaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.4)
+    ax.spines['bottom'].set_color(grid); ax.spines['left'].set_color(grid)
+    ax.tick_params(colors=text); ax.yaxis.grid(True, color=grid, linestyle='--', alpha=0.4)
     ax.set_axisbelow(True)
-    legend = [mpatches.Patch(color=GREEN, label='Positiva'), mpatches.Patch(color=RED, label='Negativa')]
-    ax.legend(handles=legend, facecolor=BG_MID, edgecolor=GRID_COL, labelcolor=TEXT_COL, fontsize=8,
-              loc='upper right')
+    legend = [mpatches.Patch(color=green, label='Positiva'), mpatches.Patch(color=red, label='Negativa')]
+    ax.legend(handles=legend, facecolor=mid, edgecolor=grid, labelcolor=text, fontsize=8, loc='upper right')
     plt.tight_layout()
-    return _fig_to_b64(fig)
+    return _fig_to_b64(fig, dark)
 
 
-def chart_opportunities(opportunities):
+def chart_opportunities(opportunities, dark=False):
     if not opportunities:
         return None
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
     top = opportunities[:7]
     labels = [f"{o['zone'][:24]} ({o['country'][:3]})" for o in top]
     orders = [o['orders'] for o in top]
     fig, ax = plt.subplots(figsize=(8, max(3.5, len(top) * 0.52)))
-    fig.patch.set_facecolor(BG_DARK); ax.set_facecolor(BG_DARK)
-    colors = [ORANGE if i % 2 == 0 else YELLOW for i in range(len(top))]
+    fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
+    colors = [orange if i % 2 == 0 else yellow for i in range(len(top))]
     bars = ax.barh(range(len(labels)), orders, color=colors, alpha=0.88, height=0.55)
-    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, color=TEXT_COL, fontsize=8)
-    ax.set_xlabel('Órdenes semanales', color=TEXT_COL, fontsize=8)
+    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, color=text, fontsize=8)
+    ax.set_xlabel('Órdenes semanales', color=text, fontsize=8)
     ax.set_title('Zonas de Alto Volumen con Métricas Debajo del Benchmark',
-                 color=TEXT_COL, fontsize=10, fontweight='bold', pad=8)
+                 color=text, fontsize=10, fontweight='bold', pad=8)
     max_o = max(orders) if orders else 1
     ax.set_xlim(0, max_o * 1.20)
     for bar, o in zip(bars, top):
-        label = f"{o['orders']:,} órd."
         ax.text(bar.get_width() + max_o * 0.01, bar.get_y() + bar.get_height() / 2,
-                label, va='center', color=TEXT_COL, fontsize=7.5)
+                f"{o['orders']:,} órd.", va='center', color=text, fontsize=7.5)
     ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_color(GRID_COL); ax.spines['left'].set_color(GRID_COL)
-    ax.tick_params(colors=TEXT_COL); ax.xaxis.grid(True, color=GRID_COL, linestyle='--', alpha=0.4)
+    ax.spines['bottom'].set_color(grid); ax.spines['left'].set_color(grid)
+    ax.tick_params(colors=text); ax.xaxis.grid(True, color=grid, linestyle='--', alpha=0.4)
     ax.set_axisbelow(True); plt.tight_layout()
-    return _fig_to_b64(fig)
+    return _fig_to_b64(fig, dark)
+
+
+def chart_high_priority_perf(metrics_df, dark=False):
+    """Avg of key metrics by zone prioritization level."""
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
+    key_metrics = ['Perfect Orders', 'Non-Pro PTC > OP', 'Turbo Adoption',
+                   'MLTV Top Verticals Adoption', 'Pro Adoption (Last Week Status)']
+    results = {}
+    for prio in ['High Priority', 'Prioritized', 'Not Prioritized']:
+        sub = metrics_df[metrics_df['ZONE_PRIORITIZATION'] == prio]
+        row = {}
+        for m in key_metrics:
+            vals = sub[sub['METRIC'] == m]['L0W_ROLL'].dropna()
+            if len(vals):
+                v = vals.mean()
+                row[m] = v * 100 if abs(v) <= 1.5 else v
+            else:
+                row[m] = 0
+        results[prio] = row
+    short_names = ['Perfect\nOrders', 'Non-Pro\nConv.', 'Turbo\nAdop.', 'MLTV\nAdop.', 'Pro\nAdop.']
+    x = np.arange(len(key_metrics))
+    width = 0.25
+    prio_colors = [red, orange, yellow]
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
+    for i, (prio, vals) in enumerate(results.items()):
+        vals_list = [vals.get(m, 0) for m in key_metrics]
+        ax.bar(x + i * width, vals_list, width, label=prio, color=prio_colors[i], alpha=0.82)
+    ax.set_xticks(x + width)
+    ax.set_xticklabels(short_names, color=text, fontsize=8)
+    ax.set_ylabel('Valor promedio (%)', color=text, fontsize=8)
+    ax.set_title('Desempeño por Priorización de Zona', color=text, fontsize=10, fontweight='bold', pad=8)
+    ax.legend(facecolor=mid, edgecolor=grid, labelcolor=text, fontsize=8)
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(grid); ax.spines['left'].set_color(grid)
+    ax.tick_params(colors=text); ax.yaxis.grid(True, color=grid, linestyle='--', alpha=0.4)
+    ax.set_axisbelow(True); plt.tight_layout()
+    return _fig_to_b64(fig, dark)
+
+
+def chart_funnel_by_country(metrics_df, dark=False):
+    """Show funnel conversion stages averaged by country."""
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
+    funnel_metrics = ['Restaurants SST > SS CVR', 'Restaurants SS > ATC CVR', 'Non-Pro PTC > OP']
+    short = ['SST→SS\n(listing→tienda)', 'SS→ATC\n(tienda→carrito)', 'PTC→OP\n(pago→orden)']
+    countries_ordered = ['CO', 'MX', 'AR', 'PE', 'BR', 'CL', 'EC', 'UY', 'CR']
+    data = {}
+    for country in countries_ordered:
+        sub = metrics_df[metrics_df['COUNTRY'] == country]
+        row = []
+        for m in funnel_metrics:
+            vals = sub[sub['METRIC'] == m]['L0W_ROLL'].dropna()
+            row.append(vals.mean() * 100 if len(vals) and abs(vals.mean()) <= 1.5 else (vals.mean() if len(vals) else 0))
+        data[country] = row
+    x = np.arange(len(countries_ordered))
+    width = 0.25
+    funnel_colors = [red, orange, yellow]
+    fig, ax = plt.subplots(figsize=(9, 3.8))
+    fig.patch.set_facecolor(bg); ax.set_facecolor(bg)
+    for i, (m, s, c) in enumerate(zip(funnel_metrics, short, funnel_colors)):
+        vals_list = [data[country][i] for country in countries_ordered]
+        ax.bar(x + i * width, vals_list, width, label=s, color=c, alpha=0.82)
+    ax.set_xticks(x + width)
+    ax.set_xticklabels(countries_ordered, color=text, fontsize=9)
+    ax.set_ylabel('% conversión', color=text, fontsize=8)
+    ax.set_title('Embudo de Conversión en Restaurantes por País', color=text, fontsize=10, fontweight='bold', pad=8)
+    ax.legend(facecolor=mid, edgecolor=grid, labelcolor=text, fontsize=7.5, loc='lower right')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(grid); ax.spines['left'].set_color(grid)
+    ax.tick_params(colors=text); ax.yaxis.grid(True, color=grid, linestyle='--', alpha=0.4)
+    ax.set_axisbelow(True); plt.tight_layout()
+    return _fig_to_b64(fig, dark)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -427,26 +527,66 @@ def generate_executive_summary(raw_insights: dict) -> dict:
     top_corr      = raw_insights['correlations'][:4]
     declining     = raw_insights['declining_trends'][:5]
 
-    prompt = f"""Eres analista senior de Rappi. Con base en estos datos operacionales, escribe en español un resumen ejecutivo CONCISO y ACCIONABLE para un Director de Operaciones o VP de SP&A.
+    # Build compact human-readable summaries for the prompt
+    anom_summary = "\n".join([
+        f"- {a['zone']} ({a['country']}): {a['metric']} cambió {a['change_display']} WoW"
+        for a in top_anomalies
+    ])
+    dec_summary = "\n".join([
+        f"- {t['zone']} ({t['country']}): {t['metric']} cayó {t['total_change_pct']*100:.0f}% en 4 semanas"
+        for t in declining
+    ])
+    opp_summary = "\n".join([
+        f"- {o['zone']} ({o['country']}): {o['metric']} en {o['metric_value_fmt']} vs benchmark {o['benchmark_fmt']} — {o['orders']:,} órdenes/sem"
+        for o in top_opps
+    ])
+    corr_summary = "\n".join([
+        f"- {c['metric_a']} ↔ {c['metric_b']}: correlación {c['strength'].lower()} (r={c['correlation']:.2f})"
+        for c in top_corr
+    ])
 
-ANOMALÍAS (cambios WoW más grandes):
-{json.dumps(top_anomalies, ensure_ascii=False, default=str)[:2500]}
+    prompt = f"""Sos analista senior de Rappi. Escribí un resumen ejecutivo en español para un Director de Operaciones o VP de SP&A.
 
-TENDENCIAS EN DETERIORO (3+ semanas):
-{json.dumps(declining, ensure_ascii=False, default=str)[:1200]}
+CONTEXTO: Rappi opera en 9 países (AR, BR, CL, CO, CR, EC, MX, PE, UY) con cientos de zonas.
+Las métricas clave son:
+- WoW: variación de una semana a la siguiente
+- Perfect Orders: órdenes sin problemas / total (>85% es aceptable, >90% es bueno)
+- Gross Profit UE: margen bruto por orden en moneda local (negativo = pérdida por orden)
+- Lead Penetration: tiendas activas / prospectos identificados (mide cobertura de merchants)
+- Non-Pro PTC→OP: conversión de checkout a orden completada (usuarios sin Pro)
+- Turbo Adoption: % de usuarios que usan Turbo donde está disponible
 
-OPORTUNIDADES (alto volumen, bajo rendimiento):
-{json.dumps(top_opps, ensure_ascii=False, default=str)[:1200]}
+ANOMALÍAS DETECTADAS (cambios abruptos semana vs semana):
+{anom_summary}
 
-CORRELACIONES CLAVE:
-{json.dumps(top_corr, ensure_ascii=False, default=str)[:700]}
+TENDENCIAS EN DETERIORO (3+ semanas seguidas cayendo):
+{dec_summary}
 
-Devuelve EXACTAMENTE este JSON (sin markdown, sin texto extra):
+OPORTUNIDADES (zonas con alto volumen y métricas debajo del benchmark):
+{opp_summary}
+
+CORRELACIONES ESTADÍSTICAS ENTRE MÉTRICAS:
+{corr_summary}
+
+Escribí hallazgos que expliquen QUÉ está pasando, EN QUÉ MÉTRICA y CUÁL ES EL IMPACTO DE NEGOCIO.
+Ejemplo BUENO: "GRAN_MENDOZA_GODOY (Argentina) perdió 1.70 puntos de Gross Profit UE en una semana — pasó de rentabilidad positiva a negativa, lo que indica que las órdenes en esta zona generan pérdida."
+Ejemplo MALO: "Se detectaron anomalías WoW en múltiples métricas."
+
+Devolvé EXACTAMENTE este JSON (sin markdown, sin texto extra):
 {{
-  "hallazgos_criticos": ["hallazgo 1 con dato concreto y país", "hallazgo 2", "hallazgo 3", "hallazgo 4", "hallazgo 5"],
-  "narrativa": "2 párrafos ejecutivos. Menciona países y zonas específicas. Explica impacto en negocio (revenue, experiencia de usuario, retención de merchants). Conecta las anomalías con oportunidades.",
-  "recomendaciones": ["Acción concreta 1 con zona/métrica específica", "Acción 2", "Acción 3", "Acción 4", "Acción 5", "Acción 6"],
-  "alerta_critica": "1 frase. El hallazgo MÁS urgente esta semana."
+  "hallazgos_criticos": [
+    "hallazgo 1: zona + país + métrica + qué pasó + impacto de negocio en 1-2 oraciones",
+    "hallazgo 2",
+    "hallazgo 3",
+    "hallazgo 4",
+    "hallazgo 5"
+  ],
+  "narrativa": "2 párrafos. Párrafo 1: explicar el patrón general de esta semana (qué métrica está más afectada y en qué países). Párrafo 2: conectar las oportunidades con las correlaciones — qué intervención concreta puede tener el mayor impacto.",
+  "recomendaciones": [
+    "acción 1: con zona/país/métrica específica y qué hacer exactamente",
+    "acción 2", "acción 3", "acción 4", "acción 5", "acción 6"
+  ],
+  "alerta_critica": "1 frase. El hallazgo MÁS urgente con zona, métrica y magnitud concreta."
 }}"""
 
     payload = {
@@ -463,27 +603,79 @@ Devuelve EXACTAMENTE este JSON (sin markdown, sin texto extra):
         text = resp.json()['candidates'][0]['content']['parts'][0]['text']
         return json.loads(text.strip())
     except Exception as e:
-        # Fallback without Gemini
+        # Meaningful fallback using actual data — no generic phrases
         anoms = raw_insights.get('anomalies', [])
         corrs = raw_insights.get('correlations', [])
+        dec   = raw_insights.get('declining_trends', [])
+        opps  = raw_insights.get('opportunities', [])
+
+        hallazgos = []
+        if anoms:
+            a = anoms[0]
+            hallazgos.append(
+                f"{a['zone']} ({a['country']}) registró un cambio de {a['change_display']} en {a['metric']} "
+                f"semana vs semana — {'deterioro abrupto que requiere investigación urgente' if a['direction']=='deterioro' else 'mejora inesperada a investigar para replicar'}."
+            )
+        if len(anoms) > 1:
+            gp_det = [a for a in anoms if 'Gross Profit' in a['metric'] and a['direction'] == 'deterioro']
+            if gp_det:
+                countries_affected = list(set(a['country'] for a in gp_det[:5]))
+                hallazgos.append(
+                    f"Gross Profit UE en deterioro en {len(gp_det)} zonas de {', '.join(countries_affected[:3])} — "
+                    f"varias zonas operando con margen negativo esta semana."
+                )
+        if dec:
+            d = dec[0]
+            hallazgos.append(
+                f"{d['zone']} ({d['country']}) acumula {abs(d['total_change_pct']*100):.0f}% de deterioro en {d['metric']} "
+                f"durante 4 semanas consecutivas — señal de problema estructural, no puntual."
+            )
+        if opps:
+            o = opps[0]
+            hallazgos.append(
+                f"Oportunidad prioritaria: {o['zone']} ({o['country']}) tiene {o['orders']:,} órdenes semanales "
+                f"pero {o['metric']} en {o['metric_value_fmt']} vs benchmark {o['benchmark_fmt']} — "
+                f"mejorar esta métrica tendría alto impacto inmediato."
+            )
+        if corrs:
+            c = corrs[0]
+            hallazgos.append(
+                f"Correlación fuerte (r={c['correlation']:.2f}) entre {c['metric_a']} y {c['metric_b']}: "
+                f"mejorar una arrastra a la otra — es el par de métricas con mayor palanca operacional."
+            )
+        while len(hallazgos) < 5:
+            hallazgos.append(f"Se detectaron {len(raw_insights.get('benchmarking_gaps',[]))} brechas de benchmarking entre zonas del mismo país y tipo — revisar para identificar oportunidades de transferencia de buenas prácticas.")
+
+        recs = []
+        if anoms:
+            recs.append(f"Investigar causa raíz en {anoms[0]['zone']} ({anoms[0]['country']}): {anoms[0]['metric']} cambió {anoms[0]['change_display']} WoW — convocar al equipo local esta semana.")
+        if dec:
+            recs.append(f"Plan de intervención urgente para {dec[0]['zone']} ({dec[0]['country']}): {dec[0]['metric']} en caída por 4 semanas — escalar al country manager.")
+        if opps:
+            recs.append(f"Priorizar mejora de {opps[0]['metric']} en {opps[0]['zone']} ({opps[0]['country']}): zona de alto volumen ({opps[0]['orders']:,} órd/sem) con gap de {abs(opps[0]['gap_pct']*100):.0f}% vs benchmark.")
+        if corrs:
+            recs.append(f"Invertir en mejorar {corrs[0]['metric_a']} — dado que tiene correlación fuerte con {corrs[0]['metric_b']}, el efecto será doble.")
+        recs += [
+            "Documentar las buenas prácticas de las zonas con mejora consistente y compartirlas con equipos locales.",
+            "Revisar estructura de costos en todas las zonas con Gross Profit UE negativo o en caída.",
+        ]
+
+        alert = f"{anoms[0]['zone']} ({anoms[0]['country']}) — {anoms[0]['metric']}: {anoms[0]['change_display']} WoW." if anoms else "Múltiples zonas con Gross Profit UE negativo — revisar urgente."
+
         return {
-            "hallazgos_criticos": [
-                f"Se detectaron {len(anoms)} anomalías WoW en múltiples métricas y países.",
-                f"{len(declining)} zonas en deterioro consistente 3+ semanas consecutivas.",
-                f"{len(top_opps)} zonas de alto volumen por debajo del benchmark en métricas clave.",
-                f"Correlación {corrs[0]['strength'].lower()} ({corrs[0]['correlation']:.2f}) entre {corrs[0]['metric_a']} y {corrs[0]['metric_b']}." if corrs else "Correlaciones moderadas entre métricas de conversión.",
-                f"Brechas de benchmarking detectadas en {len(raw_insights.get('benchmarking_gaps',[]))} combinaciones país/tipo.",
-            ],
-            "narrativa": "El análisis automático detectó patrones de deterioro en múltiples métricas. Se recomienda revisar las zonas con mayor volumen de órdenes que están por debajo del benchmark, ya que representan el mayor potencial de impacto. Las correlaciones detectadas sugieren que mejoras tempranas en el funnel de conversión tienen efecto positivo en otras métricas clave.",
-            "recomendaciones": [
-                "Revisar operación en las zonas con deterioro WoW >20% e identificar causa raíz esta semana.",
-                "Escalar al equipo local las zonas con tendencia negativa en 3+ semanas consecutivas.",
-                "Priorizar mejora de Perfect Orders en zonas de alto volumen por debajo del benchmark.",
-                "Analizar zonas con mejora excepcional para documentar y replicar buenas prácticas.",
-                "Cruzar Lead Penetration baja con bajo Perfect Orders para identificar zonas de doble riesgo.",
-                "Revisar estructura de costos en zonas con Gross Profit UE negativo o en caída.",
-            ],
-            "alerta_critica": f"{anoms[0]['zone']} ({anoms[0]['country']}) — {anoms[0]['metric']}: {anoms[0]['change_display']} WoW." if anoms else "Revisar tendencias de deterioro consistente esta semana."
+            "hallazgos_criticos": hallazgos[:5],
+            "narrativa": (
+                f"Esta semana, la métrica con mayor presencia en las alertas es Gross Profit UE, "
+                f"con deterioros abruptos en {', '.join(list(set(a['country'] for a in anoms[:5] if 'Gross Profit' in a['metric']))[:3])}. "
+                f"Esto sugiere un problema sistémico en la estructura de costos o política de descuentos "
+                f"que requiere revisión coordinada entre los equipos de operaciones y finanzas.\n\n"
+                f"En cuanto a oportunidades, las zonas de alto volumen con métricas debajo del benchmark "
+                f"representan el mayor potencial de impacto inmediato. La correlación detectada entre "
+                f"{corrs[0]['metric_a'] if corrs else 'MLTV'} y {corrs[0]['metric_b'] if corrs else 'Turbo Adoption'} "
+                f"sugiere que una intervención focalizada en una sola métrica puede tener efecto cascada positivo."
+            ),
+            "recomendaciones": recs[:6],
+            "alerta_critica": alert,
         }
 
 
@@ -526,8 +718,8 @@ def generate_html_report(raw_insights: dict, executive_summary: dict) -> str:
     ch_gp      = chart_country_metric(scorecards, 'Gross Profit UE')
     ch_conv    = chart_country_metric(scorecards, 'Non-Pro PTC > OP')
     ch_turbo   = chart_country_metric(scorecards, 'Turbo Adoption')
-    ch_dec     = chart_trend_sparklines(declining, 'Zonas en Deterioro Consistente (3+ semanas)', RED)
-    ch_imp     = chart_trend_sparklines(improving, 'Zonas con Mejora Consistente (3+ semanas)', GREEN)
+    ch_dec     = chart_trend_sparklines(declining, 'Zonas en Deterioro Consistente (3+ semanas)', 'red')
+    ch_imp     = chart_trend_sparklines(improving, 'Zonas con Mejora Consistente (3+ semanas)', 'green')
     ch_corr    = chart_correlations(correlations)
     ch_opp     = chart_opportunities(opps)
 
@@ -986,15 +1178,18 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
     narrativa  = ex.get('narrativa', '')
 
     # ── Generate charts ───────────────────────────────────────────
+    metrics_df = raw_insights.get('_metrics_df', None)
     ch_anom = chart_anomalies_top(anomalies)
-    ch_dec  = chart_trend_sparklines(declining, 'Tendencias de Deterioro', RED)
-    ch_imp  = chart_trend_sparklines(improving, 'Zonas con Mejora Consistente', GREEN)
+    ch_dec  = chart_trend_sparklines(declining, 'Tendencias de Deterioro', 'red')
+    ch_imp  = chart_trend_sparklines(improving, 'Zonas con Mejora Consistente', 'green')
     ch_corr = chart_correlations(corrs)
     ch_opp  = chart_opportunities(opps)
     ch_po   = chart_country_metric(scorecards, 'Perfect Orders')
     ch_lp   = chart_country_metric(scorecards, 'Lead Penetration')
     ch_gp   = chart_country_metric(scorecards, 'Gross Profit UE')
     ch_conv = chart_country_metric(scorecards, 'Non-Pro PTC > OP')
+    ch_prio = chart_high_priority_perf(metrics_df) if metrics_df is not None else None
+    ch_funnel = chart_funnel_by_country(metrics_df) if metrics_df is not None else None
 
     now = datetime.now().strftime('%d/%m/%Y %H:%M')
 

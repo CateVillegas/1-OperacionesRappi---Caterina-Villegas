@@ -24,7 +24,8 @@ from src.insights_engine import (compile_raw_insights, generate_report_with_gemi
                                   generate_pdf_report, generate_executive_summary,
                                   chart_anomalies_top, chart_trend_sparklines,
                                   chart_correlations, chart_opportunities,
-                                  chart_country_metric)
+                                  chart_country_metric, chart_high_priority_perf,
+                                  chart_funnel_by_country)
 
 import matplotlib
 matplotlib.use('Agg')
@@ -561,6 +562,8 @@ def insights_data():
         raw['executive_summary'] = exec_summary
 
         scorecards = raw.get('scorecards', [])
+        metrics_df = raw.pop('_metrics_df', None)
+
         data = {
             'executive_summary': exec_summary,
             'counts': {
@@ -579,18 +582,20 @@ def insights_data():
             'opportunities': raw.get('opportunities', [])[:10],
             'scorecards': scorecards,
             'charts': {
-                'anomalies': chart_anomalies_top(raw.get('anomalies', [])),
-                'declining': chart_trend_sparklines(raw.get('declining_trends', []), 'Tendencias de Deterioro', '#E03000'),
-                'improving': chart_trend_sparklines(raw.get('improving_trends', []), 'Zonas con Mejora Consistente', '#16A34A'),
-                'correlations': chart_correlations(raw.get('correlations', [])),
-                'opportunities': chart_opportunities(raw.get('opportunities', [])),
-                'perfect_orders': chart_country_metric(scorecards, 'Perfect Orders'),
-                'lead_penetration': chart_country_metric(scorecards, 'Lead Penetration'),
-                'gross_profit': chart_country_metric(scorecards, 'Gross Profit UE'),
+                'anomalies': chart_anomalies_top(raw.get('anomalies', []), dark=True),
+                'declining': chart_trend_sparklines(raw.get('declining_trends', []), 'Tendencias de Deterioro', 'red', dark=True),
+                'improving': chart_trend_sparklines(raw.get('improving_trends', []), 'Zonas con Mejora Consistente', 'green', dark=True),
+                'correlations': chart_correlations(raw.get('correlations', []), dark=True),
+                'opportunities': chart_opportunities(raw.get('opportunities', []), dark=True),
+                'perfect_orders': chart_country_metric(scorecards, 'Perfect Orders', dark=True),
+                'lead_penetration': chart_country_metric(scorecards, 'Lead Penetration', dark=True),
+                'gross_profit': chart_country_metric(scorecards, 'Gross Profit UE', dark=True),
+                'high_priority': chart_high_priority_perf(metrics_df, dark=True) if metrics_df is not None else None,
+                'funnel': chart_funnel_by_country(metrics_df, dark=True) if metrics_df is not None else None,
             },
-            '_raw': raw,  # keep for PDF generation
         }
-        # Store for PDF use
+        # Store raw (with metrics_df back) for PDF use
+        raw['_metrics_df'] = metrics_df
         app._last_insights_raw = raw
         return jsonify(data)
     except Exception as e:

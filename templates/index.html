@@ -487,8 +487,20 @@ function renderInsights(data) {
   kv.forEach((v,i)=>html+=`<div class="kpi-card"><div class="kpi-val" style="color:${kc[i]}">${v??'—'}</div><div class="kpi-lbl">${kl[i]}</div></div>`);
   html+='</div>';
 
+  // INDEX
+  const sections=[
+    ['1','📋 Resumen Ejecutivo'],['2','🌎 Scorecard por País'],['3','⚠️ Anomalías Detectadas'],
+    ['4','📉 Tendencias Preocupantes'],['5','📊 Benchmarking'],['6','🔗 Correlaciones'],
+    ['7','📐 Priorización de Zonas'],['8','🔀 Embudo de Conversión'],
+    ['9','💎 Oportunidades de Alto Impacto'],['10','✅ Recomendaciones']
+  ];
+  html+=`<div class="ins-section" style="padding:12px 16px"><div class="ins-title" style="font-size:12px;margin-bottom:8px">Índice</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:3px">`;
+  sections.forEach(([n,t])=>html+=`<div style="font-size:11px;color:var(--tx2)"><span style="color:var(--red);font-weight:700;margin-right:5px">${n}.</span>${t}</div>`);
+  html+='</div></div>';
+
   // 1. Executive summary
-  html+=`<div class="ins-section"><div class="ins-title">📋 Resumen Ejecutivo</div><div class="ins-sub">Generado por Gemini 2.5 Flash para VP Operations &amp; SP&amp;A</div>`;
+  html+=`<div id="sec1" class="ins-section"><div class="ins-title">📋 Resumen Ejecutivo</div>
+  <div class="ins-sub">Análisis generado automáticamente por Gemini 2.5 Flash a partir de los datos de la semana actual. Cada hallazgo incluye la zona, la métrica afectada y su impacto de negocio.</div>`;
   if(ex.hallazgos_criticos?.length) {
     html+='<div>';
     ex.hallazgos_criticos.forEach(h=>html+=`<div class="finding-item"><div class="finding-bullet">◆</div><div class="finding-text">${h}</div></div>`);
@@ -504,7 +516,13 @@ function renderInsights(data) {
   if(sc.length) {
     const sm=['Perfect Orders','Lead Penetration','Gross Profit UE','Non-Pro PTC > OP','Turbo Adoption'];
     const sh=['Perf. Orders','Lead P.','GP UE','PTC>OP','Turbo'];
-    html+=`<div class="ins-section"><div class="ins-title">🌎 Scorecard por País</div><div class="ins-sub">Mediana por país · WoW vs semana anterior · Ordenado por volumen de órdenes</div><div style="overflow-x:auto"><table class="ins-table"><thead><tr><th>País</th><th>Órdenes</th>${sh.map(m=>`<th>${m}</th>`).join('')}</tr></thead><tbody>`;
+    html+=`<div id="sec2" class="ins-section"><div class="ins-title">🌎 Scorecard por País</div>
+    <div class="ins-sub">
+      <strong style="color:var(--tx)">Cómo leerlo:</strong> Cada columna es la mediana de todas las zonas del país en la semana actual.
+      Los ↑↓ indican si mejoró o empeoró respecto a la semana anterior (WoW = Week over Week).
+      Ordenado de mayor a menor volumen de órdenes semanales.
+    </div>
+    <div style="overflow-x:auto"><table class="ins-table"><thead><tr><th>País</th><th>Órdenes</th>${sh.map(m=>`<th>${m}</th>`).join('')}</tr></thead><tbody>`;
     sc.forEach(s=>{
       html+=`<tr><td><strong style="color:var(--tx)">${s.country}</strong></td><td style="text-align:center">${(s.total_orders||0).toLocaleString()}</td>`;
       sm.forEach(m=>{
@@ -523,78 +541,156 @@ function renderInsights(data) {
       html+='</div>';
     }
     if(charts.gross_profit) html+=`<div class="ins-chart">${imgTag(charts.gross_profit)}</div>`;
-    html+=`<div class="interp">📌 Los ↑↓ muestran si la métrica mejoró o empeoró respecto a la semana anterior. Un país con múltiples ↓ requiere revisión de su playbook local.</div></div>`;
+    html+=`<div class="interp">📌 <strong>¿Qué buscar?</strong> Países con múltiples ↓ en Perfect Orders y Gross Profit UE al mismo tiempo indican problemas operacionales sistémicos, no puntuales. Uruguay y Perú suelen liderar en Perfect Orders — sus prácticas son replicables.</div></div>`;
   }
 
   // 3. Anomalies
-  html+=`<div class="ins-section"><div class="ins-title">⚠️ Anomalías Detectadas — Cambios Drásticos WoW</div><div class="ins-sub">Variación &gt;10% semana vs semana anterior. El deterioro requiere investigación urgente; la mejora inesperada merece replicación.</div>`;
-  if(charts.anomalies) { html+=`<div class="ins-chart">${imgTag(charts.anomalies)}</div>`; html+=`<div class="interp">📌 Las barras más largas = cambios más drásticos. Priorizá las zonas con alto volumen de órdenes. Un deterioro en Gross Profit UE puede indicar cambios en costos logísticos o descuentos.</div>`; }
+  html+=`<div id="sec3" class="ins-section"><div class="ins-title">⚠️ Anomalías Detectadas — Cambios Drásticos WoW</div>
+  <div class="ins-sub">
+    <strong style="color:var(--tx)">Qué es una anomalía:</strong> Un salto brusco (&gt;10%) en una métrica de una semana a la siguiente.
+    No implica tendencia — puede ser un evento puntual (campaña, falla técnica, cambio de pricing).
+    Tanto las caídas (🔴) como las mejoras inesperadas (🟢) merecen investigación.
+  </div>`;
+  if(charts.anomalies) {
+    html+=`<div class="ins-chart">${imgTag(charts.anomalies)}</div>`;
+    html+=`<div class="interp">📌 <strong>Cómo leer el gráfico:</strong> La magnitud de la barra = tamaño del cambio WoW. Las zonas con mayor magnitud son las que cambiaron más bruscamente esta semana. Para priorizar cuál investigar primero, cruzar con el volumen de órdenes (sección 9).</div>`;
+  }
   const det=anoms.filter(a=>a.direction==='deterioro').slice(0,8);
   const mej=anoms.filter(a=>a.direction==='mejora').slice(0,5);
   if(det.length) {
-    html+=`<p style="font-size:11px;font-weight:600;color:var(--red);margin:10px 0 5px">Deterioros más significativos</p><div style="overflow-x:auto"><table class="ins-table"><thead><tr><th>Zona</th><th>País</th><th>Métrica</th><th>Cambio WoW</th></tr></thead><tbody>`;
+    html+=`<p style="font-size:11px;font-weight:600;color:var(--red);margin:10px 0 5px">Deterioros más significativos esta semana</p>
+    <div style="overflow-x:auto"><table class="ins-table"><thead><tr><th>Zona</th><th>País</th><th>Métrica</th><th>Cambio WoW</th></tr></thead><tbody>`;
     det.forEach(a=>html+=`<tr><td>${a.zone}</td><td>${a.country}</td><td style="font-size:10.5px">${a.metric}</td><td><span class="tag-r">${a.change_display}</span></td></tr>`);
     html+='</tbody></table></div>';
   }
   if(mej.length) {
-    html+=`<p style="font-size:11px;font-weight:600;color:var(--green);margin:10px 0 5px">Mejoras inesperadas — investigar para replicar</p><div style="overflow-x:auto"><table class="ins-table"><thead><tr><th>Zona</th><th>País</th><th>Métrica</th><th>Cambio WoW</th></tr></thead><tbody>`;
+    html+=`<p style="font-size:11px;font-weight:600;color:var(--green);margin:10px 0 5px">Mejoras inesperadas — investigar para replicar</p>
+    <div style="overflow-x:auto"><table class="ins-table"><thead><tr><th>Zona</th><th>País</th><th>Métrica</th><th>Cambio WoW</th></tr></thead><tbody>`;
     mej.forEach(a=>html+=`<tr><td>${a.zone}</td><td>${a.country}</td><td style="font-size:10.5px">${a.metric}</td><td><span class="tag-g">${a.change_display}</span></td></tr>`);
     html+='</tbody></table></div>';
   }
   html+='</div>';
 
   // 4. Trends
-  html+=`<div class="ins-section"><div class="ins-title">📉 Tendencias Preocupantes — Deterioro 3+ Semanas</div><div class="ins-sub">A diferencia de una anomalía puntual, estas zonas llevan 3+ semanas en caída — señal de problema estructural que requiere intervención.</div>`;
-  if(charts.declining){html+=`<div class="ins-chart">${imgTag(charts.declining)}</div>`;html+=`<div class="interp">📌 Cada mini-gráfico muestra la evolución de las últimas 4 semanas. Pendiente negativa sostenida = plan de acción urgente, no solo monitoreo.</div>`;}
+  html+=`<div id="sec4" class="ins-section"><div class="ins-title">📉 Tendencias Preocupantes — Deterioro 3+ Semanas Consecutivas</div>
+  <div class="ins-sub">
+    <strong style="color:var(--tx)">Diferencia con anomalías:</strong> Una tendencia es un deterioro gradual durante 3+ semanas seguidas.
+    Es más preocupante que una anomalía porque indica un problema estructural, no un evento puntual.
+    Estas zonas necesitan un plan de intervención, no solo monitoreo.
+  </div>`;
+  if(charts.declining){
+    html+=`<div class="ins-chart">${imgTag(charts.declining)}</div>`;
+    html+=`<div class="interp">📌 <strong>Cómo leer los mini-gráficos:</strong> Cada cuadro muestra la evolución de una zona en las últimas 4 semanas. Una línea con pendiente negativa consistente = problema estructural. Compará el valor inicial (Sem -3) con el actual para dimensionar el impacto acumulado.</div>`;
+  }
   if(dec.length){
-    html+=`<div style="overflow-x:auto;margin-top:8px"><table class="ins-table"><thead><tr><th>Zona</th><th>País</th><th>Métrica</th><th>Cambio total</th><th>Severidad</th></tr></thead><tbody>`;
-    dec.slice(0,10).forEach(t=>{const p=(t.total_change_pct*100).toFixed(1);const sv=Math.abs(t.total_change_pct)<0.2?['tag-y','Leve']:Math.abs(t.total_change_pct)<0.5?['tag-r','Moderado']:['tag-r','Severo'];
+    html+=`<div style="overflow-x:auto;margin-top:8px"><table class="ins-table"><thead><tr><th>Zona</th><th>País</th><th>Métrica</th><th>Caída acumulada (4 sem.)</th><th>Urgencia</th></tr></thead><tbody>`;
+    dec.slice(0,10).forEach(t=>{const p=(t.total_change_pct*100).toFixed(1);const sv=Math.abs(t.total_change_pct)<0.2?['tag-y','Monitorear']:Math.abs(t.total_change_pct)<0.5?['tag-r','Intervenir']:['tag-r','⚡ Urgente'];
       html+=`<tr><td>${t.zone}</td><td>${t.country}</td><td style="font-size:10.5px">${t.metric}</td><td style="font-family:'DM Mono',monospace;color:var(--red)">${p}%</td><td><span class="${sv[0]}">${sv[1]}</span></td></tr>`;});
     html+='</tbody></table></div>';
   }
   if(imp.length){
-    html+=`<div class="ins-sep"></div><div class="ins-title" style="color:var(--green);font-size:13px;margin-bottom:4px">📈 Mejora Consistente — Replicar</div><div class="ins-sub">Estas zonas mejoraron 3+ semanas seguidas. Investigá qué cambió.</div>`;
+    html+=`<div class="ins-sep"></div>
+    <div class="ins-title" style="color:var(--green);font-size:13px;margin-bottom:4px">📈 Zonas con Mejora Consistente — Casos a Replicar</div>
+    <div class="ins-sub">Estas zonas mejoraron durante 3+ semanas seguidas. Investigá qué cambió (equipo, campaña, proceso) para replicar la práctica en zonas similares.</div>`;
     if(charts.improving) html+=`<div class="ins-chart">${imgTag(charts.improving)}</div>`;
   }
   html+='</div>';
 
   // 5. Benchmarking
   if(gaps.length){
-    html+=`<div class="ins-section"><div class="ins-title">📊 Benchmarking — Brechas entre Zonas Similares</div><div class="ins-sub">Mismo país y tipo de zona, resultados distintos. La zona débil puede alcanzar a la referente adoptando sus prácticas.</div><div style="overflow-x:auto"><table class="ins-table"><thead><tr><th>País</th><th>Tipo</th><th>Métrica</th><th>Zona Referente ▲</th><th>Zona con Oportunidad ▼</th><th>#</th></tr></thead><tbody>`;
+    html+=`<div id="sec5" class="ins-section"><div class="ins-title">📊 Benchmarking — Brechas entre Zonas del Mismo Contexto</div>
+    <div class="ins-sub">
+      <strong style="color:var(--tx)">Cómo funciona:</strong> Se comparan zonas del mismo país y mismo tipo (Wealthy / Non Wealthy).
+      Si dos zonas tienen el mismo contexto pero resultados muy distintos, la zona débil tiene una oportunidad concreta.
+      La lógica es: si la zona referente lo logró, la zona débil también puede.
+    </div>
+    <div style="overflow-x:auto"><table class="ins-table"><thead><tr><th>País</th><th>Tipo</th><th>Métrica</th><th>Zona Referente ▲</th><th>Zona con Oportunidad ▼</th><th># Zonas</th></tr></thead><tbody>`;
     gaps.forEach(g=>{const tz=g.top_zones?.[0]||{},bz=g.bot_zones?.[0]||{};
       html+=`<tr><td><strong style="color:var(--tx)">${g.country}</strong></td><td style="font-size:10.5px;color:var(--tx3)">${g.zone_type}</td><td style="font-size:10.5px">${g.metric}</td>
         <td><span style="color:var(--green);font-weight:600">${tz.L0W_ROLL?.toFixed?.(3)??'—'}</span><br><span style="font-size:10px;color:var(--tx3)">${(tz.ZONE||'').substring(0,24)}</span></td>
         <td><span style="color:var(--red);font-weight:600">${bz.L0W_ROLL?.toFixed?.(3)??'—'}</span><br><span style="font-size:10px;color:var(--tx3)">${(bz.ZONE||'').substring(0,24)}</span></td>
         <td style="text-align:center;color:var(--yellow)">${g.zones_count}</td></tr>`;});
-    html+='</tbody></table></div><div class="interp">📌 Verde = zona referente (benchmark a alcanzar). Rojo = zona con oportunidad. Priorizá brechas en Perfect Orders — impacta directamente la experiencia del usuario.</div></div>';
+    html+=`</tbody></table></div>
+    <div class="interp">📌 <strong>Verde = referente</strong> (zona del mismo país y tipo con el mejor valor). <strong>Rojo = oportunidad</strong> (zona que puede mejorar para acercarse al referente). Priorizá brechas en Perfect Orders y Gross Profit UE — tienen impacto directo en experiencia de usuario y rentabilidad.</div>
+    </div>`;
   }
 
   // 6. Correlations
-  html+=`<div class="ins-section"><div class="ins-title">🔗 Correlaciones entre Métricas</div><div class="ins-sub">r cercano a +1 = ambas métricas suben juntas. Mejorar una puede arrastrar a la otra — identificá los pares de mayor palanca.</div>`;
+  html+=`<div id="sec6" class="ins-section"><div class="ins-title">🔗 Correlaciones entre Métricas Operacionales</div>
+  <div class="ins-sub">
+    <strong style="color:var(--tx)">Qué es una correlación:</strong> Mide si dos métricas tienden a moverse juntas en todas las zonas.
+    r = +1 significa que cuando una sube, la otra también. r = 0 significa que no hay relación.
+    Una correlación fuerte permite priorizar intervenciones: mejorar una métrica puede arrastrar a la otra sin costo adicional.
+  </div>`;
   if(charts.correlations) html+=`<div class="ins-chart">${imgTag(charts.correlations)}</div>`;
   if(corrs.length){
-    const MEANINGS={'MLTV Top Verticals Adoption|Turbo Adoption':'Activar Turbo impulsa adopción multi-vertical — efecto cascada en LTV.','Non-Pro PTC > OP|Restaurants SS > ATC CVR':'Mejorar UX en restaurantes impacta la conversión final de checkout.','MLTV Top Verticals Adoption|Pro Adoption (Last Week Status)':'Usuarios Pro adoptan más verticales — la suscripción impulsa el uso cruzado.'};
-    html+=`<div style="overflow-x:auto;margin-top:8px"><table class="ins-table"><thead><tr><th>Métrica A</th><th>Métrica B</th><th>r</th><th>Intensidad</th><th>Implicancia</th></tr></thead><tbody>`;
-    corrs.forEach(c=>{const k=`${c.metric_a}|${c.metric_b}`,m=MEANINGS[k]||MEANINGS[`${c.metric_b}|${c.metric_a}`]||'Relación estadística significativa.';const col=c.correlation>0?'var(--green)':'var(--red)';
+    const MEANINGS={
+      'MLTV Top Verticals Adoption|Turbo Adoption':'Las zonas donde los usuarios usan Turbo también tienen más adopción multi-vertical. Activar Turbo puede impulsar el uso de supermercados, farmacias, etc.',
+      'Non-Pro PTC > OP|Restaurants SS > ATC CVR':'Las zonas donde la gente agrega más cosas al carrito también completan más órdenes. Mejorar el assortment de restaurantes impacta la conversión final.',
+      'MLTV Top Verticals Adoption|Pro Adoption (Last Week Status)':'Los usuarios Pro compran en más verticales. Aumentar la adopción Pro tiene efecto cascada en el uso de otras verticales.',
+      '% Restaurants Sessions With Optimal Assortment|Restaurants SS > ATC CVR':'Más restaurantes disponibles = más clics en carrito. Ampliar el assortment local mejora directamente la conversión.'
+    };
+    html+=`<div style="overflow-x:auto;margin-top:8px"><table class="ins-table"><thead><tr><th>Métrica A</th><th>Métrica B</th><th>r</th><th>Intensidad</th><th>¿Qué significa en la práctica?</th></tr></thead><tbody>`;
+    corrs.forEach(c=>{const k=`${c.metric_a}|${c.metric_b}`,m=MEANINGS[k]||MEANINGS[`${c.metric_b}|${c.metric_a}`]||'Relación estadística significativa — explorar causa-efecto con el equipo local para identificar palancas de mejora.';const col=c.correlation>0?'var(--green)':'var(--red)';
       html+=`<tr><td style="font-size:10.5px">${c.metric_a}</td><td style="font-size:10.5px">${c.metric_b}</td><td style="font-family:'DM Mono',monospace;font-weight:700;color:${col};text-align:center">r=${c.correlation.toFixed(2)}</td><td><span class="${c.strength==='Fuerte'?'tag-g':'tag-y'}">${c.strength}</span></td><td style="font-size:10.5px;color:var(--tx2)">${m}</td></tr>`;});
     html+='</tbody></table></div>';
   }
   html+='</div>';
 
-  // 7. Opportunities
-  html+=`<div class="ins-section"><div class="ins-title">💎 Oportunidades de Alto Impacto</div><div class="ins-sub">Zonas con alto volumen de órdenes y métricas por debajo del benchmark. El volumen ya está — solo hay que mejorar la eficiencia.</div>`;
-  if(charts.opportunities){html+=`<div class="ins-chart">${imgTag(charts.opportunities)}</div>`;html+=`<div class="interp">📌 Mayor barra = mayor volumen = mayor impacto potencial de la mejora. Priorizá estas zonas antes de buscar crecimiento en nuevas áreas.</div>`;}
+  // 7. High Priority Zones
+  if(charts.high_priority){
+    html+=`<div id="sec7" class="ins-section"><div class="ins-title">📐 Desempeño por Priorización de Zona</div>
+    <div class="ins-sub">
+      <strong style="color:var(--tx)">Qué muestra:</strong> Compara el promedio de métricas clave entre zonas clasificadas como
+      High Priority, Prioritized y Not Prioritized.
+      Idealmente, las zonas High Priority deberían tener mejor desempeño — si no es así, hay una señal de que
+      la priorización no se está traduciendo en resultados.
+    </div>
+    <div class="ins-chart">${imgTag(charts.high_priority)}</div>
+    <div class="interp">📌 <strong>¿Qué buscar?</strong> Si las barras de "High Priority" y "Not Prioritized" son similares, significa que la estrategia de priorización no está impactando el desempeño operacional. Las brechas positivas en favor de High Priority son la señal de que el foco está funcionando.</div>
+    </div>`;
+  }
+
+  // 8. Funnel
+  if(charts.funnel){
+    html+=`<div id="sec8" class="ins-section"><div class="ins-title">🔀 Embudo de Conversión en Restaurantes por País</div>
+    <div class="ins-sub">
+      <strong style="color:var(--tx)">Las tres etapas del funnel:</strong><br>
+      1. <strong>SST→SS</strong>: Del listado de restaurantes, el usuario selecciona uno.<br>
+      2. <strong>SS→ATC</strong>: Dentro del restaurante, el usuario agrega algo al carrito.<br>
+      3. <strong>PTC→OP</strong>: El usuario completa el checkout y confirma la orden.<br>
+      Un país con alta conversión en etapa 1 pero baja en etapa 2 indica problema de assortment (menú poco atractivo, precios altos).
+      Un problema en etapa 3 indica fricción en el pago.
+    </div>
+    <div class="ins-chart">${imgTag(charts.funnel)}</div>
+    <div class="interp">📌 <strong>Comparar entre países:</strong> Si un país tiene una etapa específica del funnel consistentemente más baja, esa es la palanca de mejora. Una caída entre etapas 2 y 3 en un país específico puede indicar problemas con los métodos de pago o la UX del checkout local.</div>
+    </div>`;
+  }
+
+  // 9. Opportunities
+  html+=`<div id="sec9" class="ins-section"><div class="ins-title">💎 Oportunidades de Alto Impacto</div>
+  <div class="ins-sub">
+    <strong style="color:var(--tx)">Cómo se identifican:</strong> Zonas con alto volumen de órdenes semanales (top 35% de la red)
+    pero con una o más métricas por debajo del benchmark global (mediana de todas las zonas).
+    Son las oportunidades de mayor retorno inmediato: el volumen ya está, solo hay que mejorar la eficiencia.
+    Priorizá estas zonas antes de buscar crecimiento en áreas nuevas.
+  </div>`;
+  if(charts.opportunities){
+    html+=`<div class="ins-chart">${imgTag(charts.opportunities)}</div>`;
+    html+=`<div class="interp">📌 La longitud de la barra = volumen de órdenes semanales. Mayor barra = mayor impacto potencial si se mejora la métrica. La tabla debajo detalla exactamente cuánto está por debajo del benchmark cada zona y en qué métrica específica.</div>`;
+  }
   if(opps.length){
-    html+=`<div style="overflow-x:auto;margin-top:8px"><table class="ins-table"><thead><tr><th>Zona</th><th>País/Tipo</th><th>Métrica</th><th>Actual</th><th>Benchmark</th><th>Órdenes/sem</th></tr></thead><tbody>`;
+    html+=`<div style="overflow-x:auto;margin-top:8px"><table class="ins-table"><thead><tr><th>Zona</th><th>País/Tipo</th><th>Métrica con Gap</th><th>Valor actual</th><th>Benchmark (mediana red)</th><th>Órdenes/sem</th></tr></thead><tbody>`;
     opps.forEach(o=>html+=`<tr><td>${o.zone}</td><td style="font-size:10.5px;color:var(--tx3)">${o.country}<br>${o.zone_type||''}</td><td style="font-size:10.5px">${o.metric}</td><td><span class="tag-r">${o.metric_value_fmt}</span></td><td><span class="tag-g">${o.benchmark_fmt}</span></td><td style="font-weight:600;text-align:center">${(o.orders||0).toLocaleString()}</td></tr>`);
     html+='</tbody></table></div>';
   }
   html+='</div>';
 
-  // 8. Recommendations
+  // 10. Recommendations
   const recs=ex.recomendaciones||[];
   if(recs.length){
-    html+=`<div class="ins-section"><div class="ins-title">✅ Recomendaciones Accionables para Esta Semana</div><div class="ins-sub">Derivadas directamente de los hallazgos anteriores — priorizadas por impacto potencial.</div>`;
+    html+=`<div id="sec10" class="ins-section"><div class="ins-title">✅ Recomendaciones Accionables para Esta Semana</div>
+    <div class="ins-sub">Derivadas directamente de los hallazgos anteriores — priorizadas por potencial de impacto inmediato.</div>`;
     recs.forEach((r,i)=>html+=`<div class="rec-item"><div class="rec-num">${i+1}</div><div class="rec-text">→ ${r}</div></div>`);
     html+='</div>';
   }
@@ -602,6 +698,7 @@ function renderInsights(data) {
   html+=`<div style="text-align:center;color:var(--tx3);font-size:10.5px;padding:14px 0 6px;border-top:1px solid var(--bdr);margin-top:4px">Rappi Analytics Intelligence Suite · Datos indicativos — validar con equipos locales antes de tomar decisiones.</div>`;
   body.innerHTML=html;
 }
+
 
 window.onload=()=>{ document.getElementById('messageInput').focus(); };
 </script>
