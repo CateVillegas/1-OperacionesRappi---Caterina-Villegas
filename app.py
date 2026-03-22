@@ -20,7 +20,11 @@ except Exception:
 from src.data_loader import load_data, get_context_summary, WEEK_LABELS, is_percentage_metric
 from src.analysis import run_analysis_query
 from src.gemini_client import parse_query_to_analysis, generate_response, generate_chart_data, generate_conversational_response
-from src.insights_engine import compile_raw_insights, generate_report_with_gemini, generate_pdf_report
+from src.insights_engine import (compile_raw_insights, generate_report_with_gemini,
+                                  generate_pdf_report, generate_executive_summary,
+                                  chart_anomalies_top, chart_trend_sparklines,
+                                  chart_correlations, chart_opportunities,
+                                  chart_country_metric)
 
 import matplotlib
 matplotlib.use('Agg')
@@ -548,8 +552,70 @@ def report_preview():
     return jsonify({'error': 'No hay reporte generado'}), 404
 
 
-@app.route('/api/context', methods=['GET'])
-def context():
+@app.route('/api/insights-data', methods=['POST'])
+def insights_data():
+    """Generate full insights with charts and executive summary. Called on demand."""
+    try:
+        raw = compile_raw_insights()
+        exec_summary = generate_executive_summary(raw)
+        raw['executive_summary'] = exec_summary
+
+        scorecards = raw.get('scorecards', [])
+        data = {
+            'executive_summary': exec_summary,
+            'counts': {
+                'anomalies': len(raw.get('anomalies', [])),
+                'declining': len(raw.get('declining_trends', [])),
+                'improving': len(raw.get('improving_trends', [])),
+                'opportunities': len(raw.get('opportunities', [])),
+                'gaps': len(raw.get('benchmarking_gaps', [])),
+                'countries': len(scorecards),
+            },
+            'anomalies': raw.get('anomalies', [])[:12],
+            'declining_trends': raw.get('declining_trends', [])[:10],
+            'improving_trends': raw.get('improving_trends', [])[:6],
+            'benchmarking_gaps': raw.get('benchmarking_gaps', [])[:8],
+            'correlations': raw.get('correlations', [])[:8],
+            'opportunities': raw.get('opportunities', [])[:10],
+            'scorecards': scorecards,
+            'charts': {
+                'anomalies': chart_anomalies_top(raw.get('anomalies', [])),
+                'declining': chart_trend_sparklines(raw.get('declining_trends', []), 'Tendencias de Deterioro', '#E03000'),
+                'improving': chart_trend_sparklines(raw.get('improving_trends', []), 'Zonas con Mejora Consistente', '#16A34A'),
+                'correlations': chart_correlations(raw.get('correlations', [])),
+                'opportunities': chart_opportunities(raw.get('opportunities', [])),
+                'perfect_orders': chart_country_metric(scorecards, 'Perfect Orders'),
+                'lead_penetration': chart_country_metric(scorecards, 'Lead Penetration'),
+                'gross_profit': chart_country_metric(scorecards, 'Gross Profit UE'),
+            },
+            '_raw': raw,  # keep for PDF generation
+        }
+        # Store for PDF use
+        app._last_insights_raw = raw
+        return jsonify(data)
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()[-800:]}), 500
+
+
+@app.route('/api/generate-pdf', methods=['POST'])
+def generate_pdf_endpoint():
+    """Generate PDF from already-computed insights (no new Gemini call)."""
+    raw = getattr(app, '_last_insights_raw', None)
+    if not raw:
+        return jsonify({'error': 'No hay insights generados. Generá los insights primero.'}), 400
+    try:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        pdf_path = os.path.join(REPORTS_DIR, f'rappi_insights_{timestamp}.pdf')
+        generate_pdf_report(raw, pdf_path)
+        return send_file(pdf_path, mimetype='application/pdf',
+                         as_attachment=True,
+                         download_name='Rappi_Reporte_Ejecutivo.pdf')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+
     return jsonify(get_context_summary())
 
 
