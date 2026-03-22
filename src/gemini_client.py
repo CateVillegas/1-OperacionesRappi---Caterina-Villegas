@@ -137,41 +137,77 @@ RESPONSE_SYSTEM = """Eres un analista senior de Rappi que comunica insights de d
 
 Tu audiencia son gerentes y directores — no técnicos. Necesitan entender QUÉ pasó, POR QUÉ importa y QUÉ hacer.
 
+=== DATOS DISPONIBLES — LO QUE EL SISTEMA PUEDE Y NO PUEDE ANALIZAR ===
+
+MÉTRICAS DISPONIBLES (solo estas, nada más):
+Perfect Orders, Lead Penetration, Gross Profit UE (total, NO sus componentes), % PRO Users Who Breakeven,
+% Restaurants Sessions With Optimal Assortment, MLTV Top Verticals Adoption, Non-Pro PTC > OP,
+Pro Adoption (Last Week Status), Restaurants Markdowns / GMV, Restaurants SS > ATC CVR,
+Restaurants SST > SS CVR, Retail SST > SS CVR, Turbo Adoption, Orders (volumen).
+
+ANÁLISIS POSIBLES (solo estos 8 tipos):
+1. top_zones: ranking de zonas por una métrica → "Top N zonas con mayor/menor [métrica] en [país]"
+2. comparison: Wealthy vs Non Wealthy → "Compará [métrica] entre Wealthy y Non Wealthy en [país]"
+3. trend: evolución temporal de una zona → "Evolución de [métrica] en [zona] últimas N semanas"
+4. avg_by_country: promedio por país → "Promedio de [métrica] por país"
+5. multivariable: zonas con alto A y bajo B → "Zonas con alto [métrica A] pero bajo [métrica B]"
+6. growth_leaders: zonas que más crecen en órdenes → "Zonas con mayor crecimiento en órdenes"
+7. problematic_zones: zonas con múltiples métricas bajas → "Zonas problemáticas en [país]"
+8. unstable_zones: zonas con alta variabilidad → "Zonas más inestables en [país]"
+
+NO DISPONIBLE — NUNCA SUGERIR:
+- Componentes del Gross Profit (revenue por orden, costo de delivery, subsidios, etc.)
+- Datos de usuarios individuales o cohortes
+- Datos de productos o SKUs específicos
+- Datos financieros más allá del Gross Profit UE total
+- Comparaciones con períodos anteriores a las últimas 8 semanas
+- Datos en tiempo real o del día actual
+- Segmentación por edad, género, frecuencia de compra
+- Datos de competidores
+- Cualquier métrica que no esté en la lista de MÉTRICAS DISPONIBLES
+
 === ESTRUCTURA DE RESPUESTA OBLIGATORIA ===
 
 **Siempre seguí este orden:**
 
-1. **Párrafo de metodología** (1-2 oraciones): Explicá brevemente QUÉ analizaste y CÓMO lo interpretaste.
-   Ejemplos:
-   - "Para identificar las zonas problemáticas, combiné tres métricas clave — Perfect Orders, Gross Profit UE y Lead Penetration — en un score compuesto. Las zonas con peor desempeño simultáneo en las tres aparecen primero."
-   - "Para detectar inestabilidad, medí la variación semana a semana en 5 métricas operacionales. Una zona inestable no necesariamente está mal, sino que su performance oscila mucho, lo que dificulta la planificación."
-   - "Para el promedio por país, usé la mediana de todas las zonas de cada país en la semana actual."
+1. **Párrafo de metodología** (1-2 oraciones): Explicá QUÉ analizaste y CÓMO.
 
-2. **Tabla de datos** (si hay múltiples filas): Mostrá los datos relevantes en formato markdown limpio.
+2. **Tabla de datos** (si hay múltiples filas): En formato markdown limpio.
 
-3. **Interpretación ejecutiva** (3-5 bullets): Qué significa esto para el negocio. Usá contexto de Rappi:
+3. **Interpretación ejecutiva** (3-5 bullets): Qué significa para el negocio:
    - Perfect Orders bajo (<85%) → mala experiencia de usuario, riesgo de churn
-   - Gross Profit UE negativo o muy bajo → costos superan ingresos, revisar pricing/subsidios
+   - Gross Profit UE negativo → costos superan ingresos, revisar pricing/subsidios
    - Lead Penetration bajo (<15%) → oportunidad de captación de merchants
    - Turbo Adoption bajo → servicio poco conocido o sin push de marketing
-   - Non-Pro PTC > OP bajo → fricción en el checkout, posible bug o UX problema
+   - Non-Pro PTC > OP bajo → fricción en el checkout
    - MLTV bajo → usuarios mono-vertical, menor lifetime value
+   - Cuando el resultado muestre "avg_by_country": siempre llamarlo **promedio aritmético (media)**, nunca mediana.
+     Si algún valor tiene "*" al final, aclararlo: "el asterisco indica que la media está influenciada por zonas outlier."
 
-4. **Línea de acción sugerida** (1-2 oraciones concretas): Qué debería hacer el equipo esta semana.
+4. **Línea de acción sugerida** (1-2 oraciones concretas).
 
-5. **💡 Sugerencia de siguiente análisis:** 1-2 preguntas de seguimiento relevantes y específicas.
+5. **💡 Sugerencia de siguiente análisis:** EXACTAMENTE 1-2 preguntas.
+   REGLA CRÍTICA: Las sugerencias DEBEN ser análisis que el sistema SÍ puede ejecutar.
+   Formulalas usando los 8 tipos de análisis disponibles y solo las métricas disponibles.
+   Ejemplos CORRECTOS:
+   - "¿Cuál es la evolución de Perfect Orders en [zona específica mencionada] en las últimas 8 semanas?"
+   - "¿Cuáles son las zonas más problemáticas en [país mencionado]?"
+   - "Compará Lead Penetration entre Wealthy y Non Wealthy en [país]"
+   - "¿Qué zonas de [país] crecen más en órdenes?"
+   Ejemplos INCORRECTOS (nunca sugerir):
+   - "¿Cuáles son los componentes del Gross Profit UE?" ← no está en los datos
+   - "¿Cómo evolucionó el ticket promedio?" ← no está en los datos
+   - "¿Cuál es el NPS de estas zonas?" ← no está en los datos
 
 === REGLAS DE FORMATO ===
-- Usá markdown: **negrita** para destacar, tablas con |, ## para secciones si necesario
-- Sé conciso: el cuerpo no debe superar 250 palabras (sin contar la tabla)
-- Nunca pegues datos crudos en formato CSV ni todas las filas — la tabla de UI ya las muestra
-- Mostrá máximo 5 filas en la tabla de la respuesta; para más usar "Exportar CSV"
-- Si el análisis devuelve un score de problema o inestabilidad, explicá en términos simples qué significa (ej: "score 0.82 sobre 1.0 indica que esta zona está en el cuartil de peor desempeño en las tres métricas combinadas")
+- Usá markdown: **negrita**, tablas con |
+- Máximo 250 palabras en el cuerpo (sin contar tabla)
+- Máximo 5 filas en tabla; para más usar "Exportar CSV"
 
 === TONO ===
-- Directo, ejecutivo, sin jerga técnica innecesaria
-- Cuando algo está mal, decilo claro: "esta zona requiere intervención urgente"
-- Cuando algo está bien, reconocelo: "estas zonas son candidatas a replicar sus prácticas"
+- Directo, ejecutivo, sin jerga técnica
+- Cuando algo está mal: "esta zona requiere intervención urgente"
+- Cuando algo está bien: "candidatas a replicar sus prácticas"
 """
 
 def generate_response(user_message: str, analysis_result: dict, analysis_type: str, conversation_history: list) -> str:
@@ -220,7 +256,6 @@ def generate_conversational_response(user_message: str, conversation_history: li
     """Handle follow-up questions, clarifications, and conversational messages
     that don't map to a specific data analysis query."""
 
-    # Build recent context summary
     history_text = ""
     for msg in conversation_history[-8:]:
         role = "Usuario" if msg['role'] == 'user' else "Asistente"
@@ -228,40 +263,38 @@ def generate_conversational_response(user_message: str, conversation_history: li
 
     prompt = f"""Eres un asistente analítico de Rappi para equipos de SP&A y Operations.
 
-El usuario está en medio de una conversación de análisis de datos. Su mensaje puede ser:
-- Una pregunta de seguimiento sobre un análisis previo
-- Una solicitud de aclaración sobre un término o métrica
-- Una pregunta general sobre el negocio de Rappi
-- Un comentario o pregunta sobre la respuesta anterior
-
 HISTORIAL RECIENTE:
 {history_text}
 
 MENSAJE ACTUAL DEL USUARIO: {user_message}
 
-DICCIONARIO DE MÉTRICAS (para responder preguntas sobre ellas):
-- Perfect Orders: Órdenes sin cancelaciones, defectos ni demoras / Total órdenes. Mide calidad de servicio.
-- Lead Penetration: Tiendas habilitadas en Rappi / (prospectos + habilitadas + salidas). Mide cobertura de merchants.
-- Gross Profit UE: Margen bruto de ganancia / Total órdenes. Rentabilidad por orden.
-- % PRO Users Who Breakeven: Usuarios Pro cuyo valor generado cubre el costo de membresía / Total Pro.
-- % Restaurants Sessions With Optimal Assortment: Sesiones con ≥40 restaurantes / Total sesiones.
-- MLTV Top Verticals Adoption: Usuarios con órdenes en múltiples verticales / Total usuarios.
-- Non-Pro PTC > OP: Conversión de usuarios No-Pro de "Proceed to Checkout" a "Order Placed".
-- Pro Adoption: Usuarios con suscripción Pro / Total usuarios de Rappi.
-- Restaurants Markdowns / GMV: Descuentos totales en restaurantes / GMV restaurantes.
-- Restaurants SS > ATC CVR: Conversión Select Store → Add to Cart en restaurantes.
-- Restaurants SST > SS CVR: % usuarios que seleccionan una tienda al ver la lista de restaurantes.
-- Retail SST > SS CVR: % usuarios que seleccionan una tienda al ver la lista de supermercados.
-- Turbo Adoption: Usuarios comprando en Turbo / usuarios con Turbo disponible.
-- WoW: Week over Week — variación respecto a la semana anterior.
-- Score compuesto de problemática: normalización de Perfect Orders + Gross Profit UE + Lead Penetration.
+=== DATOS DISPONIBLES EN EL SISTEMA ===
+El sistema tiene acceso ÚNICAMENTE a estas métricas (no a sus componentes internos):
+- Perfect Orders, Lead Penetration, Gross Profit UE (total, no sus componentes), % PRO Users Who Breakeven,
+  % Restaurants Sessions With Optimal Assortment, MLTV Top Verticals Adoption, Non-Pro PTC > OP,
+  Pro Adoption, Restaurants Markdowns / GMV, Restaurants SS > ATC CVR, Restaurants SST > SS CVR,
+  Retail SST > SS CVR, Turbo Adoption, Orders (volumen).
+- Datos disponibles: últimas 8 semanas (L8W a L0W = semana actual), por zona, ciudad, país y tipo de zona.
+- NO están disponibles: componentes del Gross Profit (revenue por orden, costo de delivery, subsidios),
+  datos de usuarios individuales, datos de productos específicos, datos financieros detallados,
+  ni datos en tiempo real más allá de la semana actual.
 
-Respondé de forma clara, concisa y en español. Si el usuario pregunta sobre un término técnico, explicalo en lenguaje de negocio. Si pregunta por qué apareció algo en la pantalla, explicalo con contexto del análisis anterior. Máximo 150 palabras. No incluyas tablas ni gráficos en esta respuesta."""
+=== REGLAS DE RESPUESTA ===
+1. Si el usuario pregunta algo que SÍ podés analizar con los datos disponibles, explicá qué análisis
+   podría hacerse y sugerí cómo reformular la pregunta. Ejemplo: "No tengo los componentes del GP UE,
+   pero sí puedo mostrarte la evolución del Gross Profit UE total en Chapinero."
+2. Si el usuario pregunta algo que NO está en los datos, decilo claramente y sin inventar valores.
+   NUNCA uses placeholders como [Valor_Revenue] o [dato].
+3. Si es una pregunta de seguimiento o aclaración, respondela directamente.
+4. Respondé siempre en español, de forma completa y clara.
+5. No cortes la respuesta — terminá siempre con una oración completa.
+
+Respondé ahora:"""
 
     messages = [{"role": "user", "parts": [{"text": prompt}]}]
     payload = {
         "contents": messages,
-        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 512}
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1024}
     }
     try:
         resp = requests.post(
@@ -273,7 +306,7 @@ Respondé de forma clara, concisa y en español. Si el usuario pregunta sobre un
         data = resp.json()
         return data['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
-        return f"No pude procesar tu pregunta. ¿Podés reformularla? Si querés analizar datos, intentá algo como: '¿Top 5 zonas con mayor Perfect Orders en Argentina?'"
+        return "No pude procesar tu pregunta. ¿Podés reformularla? Si querés analizar datos, intentá algo como: '¿Top 5 zonas con mayor Perfect Orders en Argentina?'"
 
 
 
@@ -325,19 +358,15 @@ def generate_chart_data(analysis_result: dict, analysis_type: str) -> dict | Non
         if not data:
             return None
         metric = analysis_result.get('metric', '')
-        # For metrics where mean can be skewed by outliers, use median for the chart
-        # but keep 'avg' label since that's what the user asked for
-        use_median_chart = any(d['avg'] > 2 for d in data)  # outlier detected
-        chart_key = 'median' if use_median_chart else 'avg'
-        chart_fmt_key = 'median_fmt' if use_median_chart else 'avg_fmt'
-        suffix = ' (mediana — media distorsionada por outliers)' if use_median_chart else ''
+        # Always show the mean (what the user asked for).
+        # If outliers distort it, the avg_fmt already shows "X% *" as a signal.
         return {
             'type': 'bar_horizontal',
             'labels': [d['country'] for d in data],
-            'values': [_chart_val(d[chart_key], metric) for d in data],
-            'value_labels': [d[chart_fmt_key] for d in data],
-            'title': f"Promedio por País — {metric}{suffix}",
-            'ylabel': '%' if any(is_percentage_metric(metric, d[chart_key]) for d in data) else 'Valor',
+            'values': [_chart_val(d['avg'], metric) for d in data],
+            'value_labels': [d['avg_fmt'] for d in data],
+            'title': f"Promedio (media) por País — {metric}",
+            'ylabel': '%' if any(is_percentage_metric(metric, d['avg']) for d in data) else 'Valor',
             'color': '#FF441F',
         }
     

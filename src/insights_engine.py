@@ -1245,9 +1245,11 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
         ('4.', 'Tendencias Preocupantes — Deterioro Sostenido 3+ Semanas'),
         ('5.', 'Benchmarking — Brechas entre Zonas Similares'),
         ('6.', 'Correlaciones entre Métricas Operacionales'),
-        ('7.', 'Oportunidades de Alto Impacto'),
-        ('8.', 'Recomendaciones Accionables para Esta Semana'),
-        ('9.', 'Glosario de Métricas'),
+        ('7.', 'Desempeño por Priorización de Zona'),
+        ('8.', 'Embudo de Conversión en Restaurantes por País'),
+        ('9.', 'Oportunidades de Alto Impacto'),
+        ('10.', 'Recomendaciones Accionables para Esta Semana'),
+        ('11.', 'Glosario de Métricas'),
     ]
     for num, title in sections:
         story.append(Paragraph(f'<font color="#E03000"><b>{num}</b></font>  {title}', sIdx))
@@ -1336,34 +1338,21 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
 
         sc_cw = [CW*0.13, CW*0.10] + [CW*0.154]*5
         story.append(tbl(sc_rows, sc_cw))
-        story.append(Spacer(1, 6))
+        story.append(Spacer(1, 5))
         story.append(interpretation(
-            'Leé esta tabla comparando países del mismo nivel: Uruguay y Perú generalmente lideran en Perfect Orders, '
-            'lo que indica buenas prácticas operacionales replicables. Los países con WoW negativo consecutivo '
-            'en varias métricas requieren revisión de sus playbooks locales.'
+            '¿Qué buscar? Países con múltiples ↓ en Perfect Orders y Gross Profit UE al mismo tiempo '
+            'indican problemas operacionales sistémicos, no puntuales. '
+            'Uruguay y Perú suelen liderar en Perfect Orders — sus prácticas son replicables.'
         ))
 
-    # Country charts side by side
+    # Country charts - full width, one per row to avoid distortion
     story.append(Spacer(1, 8))
-    pairs = [(ch_po, 'Perfect Orders'), (ch_lp, 'Lead Penetration'),
-             (ch_gp, 'Gross Profit UE'), (ch_conv, 'Conversión No-Pro')]
-    for i in range(0, len(pairs), 2):
-        left_img, left_title = pairs[i]
-        il = img_flow(left_img, width=CW*0.47, max_h=150)
-        if i+1 < len(pairs):
-            right_img, right_title = pairs[i+1]
-            ir = img_flow(right_img, width=CW*0.47, max_h=150)
-            row = [[il or Paragraph('—', sCtr), ir or Paragraph('—', sCtr)]]
-            pair_t = Table(row, colWidths=[CW*0.49, CW*0.49])
-            pair_t.setStyle(TableStyle([
-                ('VALIGN',(0,0),(-1,-1),'TOP'),
-                ('LEFTPADDING',(0,0),(-1,-1),2),
-                ('RIGHTPADDING',(0,0),(-1,-1),2),
-            ]))
-            story.append(pair_t)
-        else:
-            if il: story.append(il)
-        story.append(Spacer(1, 4))
+    for ch, title in [(ch_po, 'Perfect Orders'), (ch_lp, 'Lead Penetration'),
+                      (ch_gp, 'Gross Profit UE'), (ch_conv, 'Non-Pro PTC > OP')]:
+        img = img_flow(ch, CW, 140)
+        if img:
+            story.append(img)
+            story.append(Spacer(1, 6))
 
     # ════════════════════════════════════════════════════════════
     # 3. ANOMALIES
@@ -1372,10 +1361,9 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
     story.append(Paragraph('3.  Anomalías Detectadas — Cambios Drásticos WoW', sH2))
     story.append(hr(CR, 0.8))
     story.append(Paragraph(
-        'Una anomalía es un cambio abrupto (>10%) de una semana a la siguiente. '
-        'Puede ser positiva (mejora inesperada, posiblemente por un evento o campaña) o negativa '
-        '(deterioro abrupto que requiere investigación urgente). No confundas con tendencias: '
-        'una anomalía es un salto puntual, no un deterioro gradual.', sBod))
+        'Qué es una anomalía: Un salto brusco (>10%) en una métrica de una semana a la siguiente. '
+        'No implica tendencia — puede ser un evento puntual (campaña, falla técnica, cambio de pricing). '
+        'Tanto las caídas como las mejoras inesperadas merecen investigación.', sBod))
     story.append(Spacer(1, 5))
 
     ch_anom_img = img_flow(ch_anom, CW, 160)
@@ -1383,10 +1371,9 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
         story.append(ch_anom_img)
         story.append(Spacer(1, 4))
         story.append(interpretation(
-            'Las barras más largas representan los cambios más drásticos. '
-            'Priorizá investigar primero las zonas con alto volumen de órdenes (ver sección 7). '
-            'Un deterioro de Gross Profit UE puede explicarse por cambios en política de descuentos o '
-            'aumento de costos logísticos en esa zona.'
+            'Cómo leer el gráfico: La magnitud de la barra = tamaño del cambio WoW. '
+            'Las zonas con mayor magnitud son las que cambiaron más bruscamente esta semana. '
+            'Para priorizar cuál investigar primero, cruzar con el volumen de órdenes (sección 9).'
         ))
 
     story.append(Spacer(1, 6))
@@ -1426,13 +1413,12 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
     # 4. TRENDS
     # ════════════════════════════════════════════════════════════
     story.append(PageBreak())
-    story.append(Paragraph('4.  Tendencias Preocupantes — Deterioro Sostenido 3+ Semanas', sH2))
+    story.append(Paragraph('4.  Tendencias Preocupantes — Deterioro 3+ Semanas Consecutivas', sH2))
     story.append(hr(CR, 0.8))
     story.append(Paragraph(
-        'A diferencia de una anomalía (salto brusco), una tendencia es un deterioro gradual y '
-        'consistente durante 3 o más semanas consecutivas. Esto es más preocupante porque sugiere '
-        'un problema estructural, no un evento puntual. Estas zonas necesitan intervención activa, '
-        'no solo monitoreo.', sBod))
+        'Diferencia con anomalías: Una tendencia es un deterioro gradual durante 3+ semanas seguidas. '
+        'Es más preocupante que una anomalía porque indica un problema estructural, no un evento puntual. '
+        'Estas zonas necesitan un plan de intervención, no solo monitoreo.', sBod))
     story.append(Spacer(1, 5))
 
     if ch_dec:
@@ -1441,28 +1427,28 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
             story.append(ch_dec_img)
             story.append(Spacer(1, 4))
             story.append(interpretation(
-                'Cada mini-gráfico muestra la evolución de las últimas 4 semanas de una zona específica. '
-                'Una línea con pendiente negativa consistente es la señal de alerta. '
-                'Compará el valor actual vs el de hace 4 semanas para dimensionar el impacto acumulado.'
+                'Cómo leer los mini-gráficos: Cada cuadro muestra la evolución de una zona en las últimas '
+                '4 semanas. Una línea con pendiente negativa consistente = problema estructural. '
+                'Compará el valor inicial (Sem -3) con el actual para dimensionar el impacto acumulado.'
             ))
 
     if declining:
         story.append(Spacer(1, 6))
         rows = [[Paragraph('Zona', sTH), Paragraph('País', sTH), Paragraph('Métrica', sTH),
-                 Paragraph('Cambio total (4 sem.)', sTH), Paragraph('Interpretación', sTH)]]
+                 Paragraph('Caída acumulada (4 sem.)', sTH), Paragraph('Urgencia', sTH)]]
         for t in declining[:10]:
             pct = t['total_change_pct'] * 100
-            interp = ('Deterioro leve' if abs(pct) < 20 else
-                      'Deterioro moderado — requiere plan de acción' if abs(pct) < 50 else
-                      'Deterioro severo — intervención urgente')
+            urgencia = ('Monitorear' if abs(pct) < 20 else
+                       'Intervenir' if abs(pct) < 50 else
+                       '⚡ Urgente')
             rows.append([
                 Paragraph(t['zone'][:30], sTD),
                 Paragraph(t['country'], sTDm),
                 Paragraph(t['metric'][:26], sTDm),
                 Paragraph(f"{pct:+.1f}%", ps('tc','Helvetica-Bold',9,CR,alignment=TA_CENTER)),
-                Paragraph(interp, sTDm),
+                Paragraph(urgencia, ps('ur','Helvetica-Bold',8,CR if abs(pct)>=50 else CY,alignment=TA_CENTER)),
             ])
-        story.append(tbl(rows, [CW*0.26, CW*0.11, CW*0.24, CW*0.15, CW*0.24]))
+        story.append(tbl(rows, [CW*0.26, CW*0.11, CW*0.24, CW*0.18, CW*0.21]))
 
     if improving:
         story.append(Spacer(1, 10))
@@ -1604,14 +1590,61 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
         story.append(tbl(rows, [CW*0.24, CW*0.15, CW*0.21, CW*0.13, CW*0.16, CW*0.11]))
 
     # ════════════════════════════════════════════════════════════
-    # 8. RECOMMENDATIONS
+    # 7. HIGH PRIORITY ZONES
+    # ════════════════════════════════════════════════════════════
+    if ch_prio:
+        story.append(PageBreak())
+        story.append(Paragraph('7.  Desempeño por Priorización de Zona', sH2))
+        story.append(hr(CR, 0.8))
+        story.append(Paragraph(
+            'Qué muestra: Compara el promedio de métricas clave entre zonas clasificadas como '
+            'High Priority, Prioritized y Not Prioritized. '
+            'Idealmente, las zonas High Priority deberían tener mejor desempeño — si no es así, '
+            'hay una señal de que la priorización no se está traduciendo en resultados.', sBod))
+        story.append(Spacer(1, 5))
+        img = img_flow(ch_prio, CW, 160)
+        if img:
+            story.append(img)
+            story.append(Spacer(1, 4))
+            story.append(interpretation(
+                '¿Qué buscar? Si las barras de "High Priority" y "Not Prioritized" son similares, '
+                'significa que la estrategia de priorización no está impactando el desempeño operacional. '
+                'Las brechas positivas en favor de High Priority son la señal de que el foco está funcionando.'
+            ))
+
+    # ════════════════════════════════════════════════════════════
+    # 8. FUNNEL
+    # ════════════════════════════════════════════════════════════
+    if ch_funnel:
+        story.append(PageBreak())
+        story.append(Paragraph('8.  Embudo de Conversión en Restaurantes por País', sH2))
+        story.append(hr(CR, 0.8))
+        story.append(Paragraph(
+            'Las tres etapas del funnel: '
+            '1) SST→SS: Del listado de restaurantes, el usuario selecciona uno. '
+            '2) SS→ATC: Dentro del restaurante, el usuario agrega algo al carrito. '
+            '3) PTC→OP: El usuario completa el checkout y confirma la orden. '
+            'Un país con alta conversión en etapa 1 pero baja en etapa 2 indica problema de assortment '
+            '(menú poco atractivo, precios altos). Un problema en etapa 3 indica fricción en el pago.', sBod))
+        story.append(Spacer(1, 5))
+        img = img_flow(ch_funnel, CW, 160)
+        if img:
+            story.append(img)
+            story.append(Spacer(1, 4))
+            story.append(interpretation(
+                'Comparar entre países: Si un país tiene una etapa específica del funnel '
+                'consistentemente más baja, esa es la palanca de mejora. '
+                'Una caída entre etapas 2 y 3 puede indicar problemas con los métodos de pago o la UX del checkout local.'
+            ))
+
+    # ════════════════════════════════════════════════════════════
+    # 9. RECOMMENDATIONS
     # ════════════════════════════════════════════════════════════
     story.append(PageBreak())
-    story.append(Paragraph('8.  Recomendaciones Accionables para Esta Semana', sH2))
+    story.append(Paragraph('9.  Recomendaciones Accionables para Esta Semana', sH2))
     story.append(hr(CR, 0.8))
     story.append(Paragraph(
-        'Acciones concretas, priorizadas por potencial de impacto. '
-        'Cada recomendación deriva directamente de los hallazgos de este reporte.', sBod))
+        'Derivadas directamente de los hallazgos anteriores — priorizadas por potencial de impacto inmediato.', sBod))
     story.append(Spacer(1, 6))
 
     if recs:
@@ -1639,7 +1672,7 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
     # 9. GLOSSARY
     # ════════════════════════════════════════════════════════════
     story.append(PageBreak())
-    story.append(Paragraph('9.  Glosario de Métricas', sH2))
+    story.append(Paragraph('10.  Glosario de Métricas', sH2))
     story.append(hr(CR, 0.8))
     story.append(Paragraph(
         'Referencia rápida de todas las métricas usadas en este reporte, '
