@@ -47,6 +47,11 @@ python app.py
 http://localhost:5001
 ```
 
+### 6. Insights automáticos y PDF
+- Desde la pantalla **Insights automáticos** del frontend podés correr el motor completo: hace clic en "Generar insights" para obtener el resumen ejecutivo, anomalías y gráficos sin usar la vista de chat.
+- Cuando el procesamiento termina, el botón **Descargar PDF** dispara la generación del reporte ejecutivo (usa `generate_pdf_report()` en background) y el archivo se guarda automáticamente en la carpeta `reports/` además de ofrecerse para descarga inmediata.
+- Cada ejecución crea un archivo nuevo con nombre `rappi_insights_YYYYMMDD_HHMMSS.pdf`, por lo que siempre queda un historial local en `reports/`.
+
 ---
 
 ## 📁 Estructura del Proyecto
