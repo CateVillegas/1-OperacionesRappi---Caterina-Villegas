@@ -134,21 +134,6 @@ rappi_analytics/
 ├── reports/                # PDFs generados (auto-creado)
 └── README.md
 ```
-
----
-
-## 💬 Ejemplos de Preguntas Soportadas
-
-| Tipo | Ejemplo |
-|------|---------|
-| Ranking | "¿Cuáles son las 5 zonas con mayor Lead Penetration?" |
-| Comparación | "Compara Perfect Order entre Wealthy y Non Wealthy en México" |
-| Tendencia | "Muestra la evolución de Gross Profit UE en Chapinero últimas 8 semanas" |
-| Promedio | "¿Cuál es el promedio de Lead Penetration por país?" |
-| Multivariable | "Zonas con alto Lead Penetration pero bajo Perfect Order" |
-| Crecimiento | "¿Qué zonas crecen más en órdenes en las últimas 5 semanas?" |
-| Inferencia | "¿Cuáles son las zonas problemáticas?" |
-
 ---
 
 ## 💰 Costo estimado de API
